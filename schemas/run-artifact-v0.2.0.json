@@ -1,0 +1,1290 @@
+{
+  "$defs": {
+    "Accounting": {
+      "additionalProperties": false,
+      "description": "Counts logical operations separately from retry attempts.\n\nA logical model turn is one runtime request for a model decision, excluding\nretries. A model attempt is each provider try. A logical tool call is one\nrequested tool operation, while a tool attempt is each execution try.",
+      "properties": {
+        "cost_usd": {
+          "minimum": 0,
+          "title": "Cost Usd",
+          "type": "number"
+        },
+        "external_model_calls": {
+          "title": "External Model Calls",
+          "type": "boolean"
+        },
+        "failed_model_attempts": {
+          "minimum": 0,
+          "title": "Failed Model Attempts",
+          "type": "integer"
+        },
+        "failed_tool_attempts": {
+          "minimum": 0,
+          "title": "Failed Tool Attempts",
+          "type": "integer"
+        },
+        "input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Tokens"
+        },
+        "logical_model_turns": {
+          "minimum": 0,
+          "title": "Logical Model Turns",
+          "type": "integer"
+        },
+        "logical_tool_calls": {
+          "minimum": 0,
+          "title": "Logical Tool Calls",
+          "type": "integer"
+        },
+        "model_attempts": {
+          "minimum": 0,
+          "title": "Model Attempts",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tokens"
+        },
+        "successful_model_attempts": {
+          "minimum": 0,
+          "title": "Successful Model Attempts",
+          "type": "integer"
+        },
+        "successful_tool_attempts": {
+          "minimum": 0,
+          "title": "Successful Tool Attempts",
+          "type": "integer"
+        },
+        "tool_attempts": {
+          "minimum": 0,
+          "title": "Tool Attempts",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "logical_model_turns",
+        "model_attempts",
+        "successful_model_attempts",
+        "failed_model_attempts",
+        "logical_tool_calls",
+        "tool_attempts",
+        "successful_tool_attempts",
+        "failed_tool_attempts",
+        "cost_usd",
+        "external_model_calls"
+      ],
+      "title": "Accounting",
+      "type": "object"
+    },
+    "AgentEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "minLength": 1,
+          "title": "Event Type",
+          "type": "string"
+        },
+        "parent_span_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Span Id"
+        },
+        "payload": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Payload",
+          "type": "object"
+        },
+        "phase": {
+          "$ref": "#/$defs/RuntimePhase"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "source_component": {
+          "minLength": 1,
+          "title": "Source Component",
+          "type": "string"
+        },
+        "span_id": {
+          "minLength": 1,
+          "title": "Span Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "minLength": 1,
+          "title": "Timestamp",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "sequence",
+        "timestamp",
+        "event_type",
+        "source_component",
+        "phase",
+        "span_id",
+        "payload"
+      ],
+      "title": "AgentEvent",
+      "type": "object"
+    },
+    "AgentState": {
+      "additionalProperties": false,
+      "properties": {
+        "final_decision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FinalDecision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "phase": {
+          "$ref": "#/$defs/RuntimePhase"
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SupervisorPlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "task": {
+          "$ref": "#/$defs/TaskSpec"
+        },
+        "worker_results": {
+          "items": {
+            "$ref": "#/$defs/WorkerResult"
+          },
+          "title": "Worker Results",
+          "type": "array"
+        }
+      },
+      "required": [
+        "phase",
+        "task",
+        "worker_results"
+      ],
+      "title": "AgentState",
+      "type": "object"
+    },
+    "AttemptOutcome": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "timed_out"
+      ],
+      "title": "AttemptOutcome",
+      "type": "string"
+    },
+    "ContentDigests": {
+      "additionalProperties": false,
+      "properties": {
+        "config_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Config Sha256",
+          "type": "string"
+        },
+        "fixture_sha256": {
+          "additionalProperties": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Fixture Sha256",
+          "type": "object"
+        },
+        "task_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Task Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_sha256",
+        "config_sha256",
+        "fixture_sha256"
+      ],
+      "title": "ContentDigests",
+      "type": "object"
+    },
+    "FailureOrigin": {
+      "enum": [
+        "configuration",
+        "model_provider",
+        "model_output",
+        "tool_policy",
+        "tool_input",
+        "tool_execution",
+        "tool_output",
+        "orchestration",
+        "artifact",
+        "cancellation",
+        "unexpected_internal"
+      ],
+      "title": "FailureOrigin",
+      "type": "string"
+    },
+    "FailureRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "exception_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exception Type"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "model_attempt_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Attempt Id"
+        },
+        "origin": {
+          "$ref": "#/$defs/FailureOrigin"
+        },
+        "phase": {
+          "$ref": "#/$defs/RuntimePhase"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "source_component": {
+          "minLength": 1,
+          "title": "Source Component",
+          "type": "string"
+        },
+        "span_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Span Id"
+        },
+        "timestamp": {
+          "minLength": 1,
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Call Id"
+        }
+      },
+      "required": [
+        "code",
+        "origin",
+        "phase",
+        "source_component",
+        "retryable",
+        "message",
+        "timestamp"
+      ],
+      "title": "FailureRecord",
+      "type": "object"
+    },
+    "FinalDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "applicable_fees": {
+          "minLength": 1,
+          "title": "Applicable Fees",
+          "type": "string"
+        },
+        "as_of_date": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "title": "As Of Date",
+          "type": "string"
+        },
+        "days_since_delivery": {
+          "minimum": 0,
+          "title": "Days Since Delivery",
+          "type": "integer"
+        },
+        "decision_code": {
+          "enum": [
+            "RETURN_ELIGIBLE",
+            "RETURN_INELIGIBLE"
+          ],
+          "title": "Decision Code",
+          "type": "string"
+        },
+        "eligible": {
+          "title": "Eligible",
+          "type": "boolean"
+        },
+        "evidence_worker_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2,
+          "title": "Evidence Worker Ids",
+          "type": "array"
+        },
+        "next_action": {
+          "minLength": 1,
+          "title": "Next Action",
+          "type": "string"
+        },
+        "order_id": {
+          "minLength": 1,
+          "title": "Order Id",
+          "type": "string"
+        },
+        "policy_window_days": {
+          "minimum": 0,
+          "title": "Policy Window Days",
+          "type": "integer"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "eligible",
+        "decision_code",
+        "reason",
+        "next_action",
+        "order_id",
+        "as_of_date",
+        "days_since_delivery",
+        "policy_window_days",
+        "applicable_fees",
+        "evidence_worker_ids"
+      ],
+      "title": "FinalDecision",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "ModelAttempt": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "minimum": 1,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "attempt_id": {
+          "minLength": 1,
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "completed_at": {
+          "minLength": 1,
+          "title": "Completed At",
+          "type": "string"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "number"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "logical_turn_id": {
+          "minLength": 1,
+          "title": "Logical Turn Id",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/AttemptOutcome"
+        },
+        "request_id": {
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelResponse"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source_component": {
+          "minLength": 1,
+          "title": "Source Component",
+          "type": "string"
+        },
+        "started_at": {
+          "minLength": 1,
+          "title": "Started At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "logical_turn_id",
+        "request_id",
+        "source_component",
+        "attempt",
+        "outcome",
+        "started_at",
+        "completed_at",
+        "duration_ms"
+      ],
+      "title": "ModelAttempt",
+      "type": "object"
+    },
+    "ModelResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "finish_reason": {
+          "minLength": 1,
+          "title": "Finish Reason",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Metadata",
+          "type": "object"
+        },
+        "model_id": {
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "provider": {
+          "const": "fixture",
+          "title": "Provider",
+          "type": "string"
+        },
+        "raw_json": {
+          "title": "Raw Json",
+          "type": "string"
+        },
+        "response_id": {
+          "minLength": 1,
+          "title": "Response Id",
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/UsageRecord"
+        }
+      },
+      "required": [
+        "response_id",
+        "raw_json",
+        "model_id",
+        "provider",
+        "finish_reason",
+        "usage",
+        "metadata"
+      ],
+      "title": "ModelResponse",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "config_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Config Sha256",
+          "type": "string"
+        },
+        "dependency_lock_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Dependency Lock Sha256",
+          "type": "string"
+        },
+        "fixture_sha256": {
+          "additionalProperties": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Fixture Sha256",
+          "type": "object"
+        },
+        "git_dirty": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Git Dirty"
+        },
+        "langgraph_version": {
+          "minLength": 1,
+          "title": "Langgraph Version",
+          "type": "string"
+        },
+        "machine_architecture": {
+          "minLength": 1,
+          "title": "Machine Architecture",
+          "type": "string"
+        },
+        "package_version": {
+          "minLength": 1,
+          "title": "Package Version",
+          "type": "string"
+        },
+        "platform_system": {
+          "minLength": 1,
+          "title": "Platform System",
+          "type": "string"
+        },
+        "python_version": {
+          "minLength": 1,
+          "title": "Python Version",
+          "type": "string"
+        },
+        "source_commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Commit"
+        },
+        "task_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Task Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "package_version",
+        "python_version",
+        "platform_system",
+        "machine_architecture",
+        "langgraph_version",
+        "dependency_lock_sha256",
+        "source_commit",
+        "git_dirty",
+        "task_sha256",
+        "config_sha256",
+        "fixture_sha256"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "RetryPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "initial_backoff_seconds": {
+          "maximum": 60,
+          "minimum": 0,
+          "title": "Initial Backoff Seconds",
+          "type": "number"
+        },
+        "jitter_ratio": {
+          "maximum": 0,
+          "minimum": 0,
+          "title": "Jitter Ratio",
+          "type": "number"
+        },
+        "max_attempts": {
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "max_backoff_seconds": {
+          "maximum": 300,
+          "minimum": 0,
+          "title": "Max Backoff Seconds",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 300,
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "max_attempts",
+        "timeout_seconds",
+        "initial_backoff_seconds",
+        "max_backoff_seconds",
+        "jitter_ratio"
+      ],
+      "title": "RetryPolicy",
+      "type": "object"
+    },
+    "RunConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "max_worker_concurrency": {
+          "maximum": 32,
+          "minimum": 1,
+          "title": "Max Worker Concurrency",
+          "type": "integer"
+        },
+        "model_fixture": {
+          "minLength": 1,
+          "title": "Model Fixture",
+          "type": "string"
+        },
+        "model_retry": {
+          "$ref": "#/$defs/RetryPolicy"
+        },
+        "order_fixture": {
+          "minLength": 1,
+          "title": "Order Fixture",
+          "type": "string"
+        },
+        "policy_fixture": {
+          "minLength": 1,
+          "title": "Policy Fixture",
+          "type": "string"
+        },
+        "provider": {
+          "const": "fixture",
+          "title": "Provider",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.2.0",
+          "default": "0.2.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "tool_retry": {
+          "$ref": "#/$defs/RetryPolicy"
+        }
+      },
+      "required": [
+        "provider",
+        "model_fixture",
+        "order_fixture",
+        "policy_fixture",
+        "max_worker_concurrency",
+        "model_retry",
+        "tool_retry"
+      ],
+      "title": "RunConfig",
+      "type": "object"
+    },
+    "RunStatus": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "title": "RunStatus",
+      "type": "string"
+    },
+    "RuntimePhase": {
+      "enum": [
+        "initialized",
+        "planning",
+        "executing_workers",
+        "finalizing",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "title": "RuntimePhase",
+      "type": "string"
+    },
+    "SupervisorPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "assignments": {
+          "items": {
+            "$ref": "#/$defs/WorkerAssignment"
+          },
+          "minItems": 1,
+          "title": "Assignments",
+          "type": "array"
+        }
+      },
+      "required": [
+        "assignments"
+      ],
+      "title": "SupervisorPlan",
+      "type": "object"
+    },
+    "TaskSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of_date": {
+          "title": "As Of Date",
+          "type": "string"
+        },
+        "customer_request": {
+          "minLength": 1,
+          "title": "Customer Request",
+          "type": "string"
+        },
+        "item_category": {
+          "minLength": 1,
+          "title": "Item Category",
+          "type": "string"
+        },
+        "item_condition": {
+          "minLength": 1,
+          "title": "Item Condition",
+          "type": "string"
+        },
+        "market": {
+          "minLength": 1,
+          "title": "Market",
+          "type": "string"
+        },
+        "order_id": {
+          "minLength": 1,
+          "title": "Order Id",
+          "type": "string"
+        },
+        "purchase_channel": {
+          "enum": [
+            "online",
+            "store"
+          ],
+          "title": "Purchase Channel",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.2.0",
+          "default": "0.2.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "task_id": {
+          "minLength": 1,
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "customer_request",
+        "order_id",
+        "as_of_date",
+        "item_condition",
+        "market",
+        "item_category",
+        "purchase_channel"
+      ],
+      "title": "TaskSpec",
+      "type": "object"
+    },
+    "ToolCall": {
+      "additionalProperties": false,
+      "properties": {
+        "call_id": {
+          "minLength": 1,
+          "title": "Call Id",
+          "type": "string"
+        },
+        "input": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Input",
+          "type": "object"
+        },
+        "span_id": {
+          "minLength": 1,
+          "title": "Span Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "minLength": 1,
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "worker_id": {
+          "minLength": 1,
+          "title": "Worker Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "call_id",
+        "worker_id",
+        "tool_name",
+        "input",
+        "span_id"
+      ],
+      "title": "ToolCall",
+      "type": "object"
+    },
+    "ToolResult": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "minimum": 1,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "attempt_span_id": {
+          "minLength": 1,
+          "title": "Attempt Span Id",
+          "type": "string"
+        },
+        "completed_at": {
+          "minLength": 1,
+          "title": "Completed At",
+          "type": "string"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "number"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "outcome": {
+          "$ref": "#/$defs/AttemptOutcome"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output"
+        },
+        "result_id": {
+          "minLength": 1,
+          "title": "Result Id",
+          "type": "string"
+        },
+        "started_at": {
+          "minLength": 1,
+          "title": "Started At",
+          "type": "string"
+        },
+        "tool_call_id": {
+          "minLength": 1,
+          "title": "Tool Call Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "minLength": 1,
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "worker_id": {
+          "minLength": 1,
+          "title": "Worker Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result_id",
+        "attempt_span_id",
+        "tool_call_id",
+        "worker_id",
+        "tool_name",
+        "attempt",
+        "outcome",
+        "started_at",
+        "completed_at",
+        "duration_ms"
+      ],
+      "title": "ToolResult",
+      "type": "object"
+    },
+    "UsageRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "cost_usd": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Cost Usd",
+          "type": "number"
+        },
+        "input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Tokens"
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tokens"
+        },
+        "token_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "provider_measured",
+                "synthetic"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token Source"
+        }
+      },
+      "title": "UsageRecord",
+      "type": "object"
+    },
+    "WorkerAssignment": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_tools": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Allowed Tools",
+          "type": "array"
+        },
+        "purpose": {
+          "minLength": 1,
+          "title": "Purpose",
+          "type": "string"
+        },
+        "worker_id": {
+          "minLength": 1,
+          "title": "Worker Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "worker_id",
+        "allowed_tools",
+        "purpose"
+      ],
+      "title": "WorkerAssignment",
+      "type": "object"
+    },
+    "WorkerResult": {
+      "additionalProperties": false,
+      "properties": {
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "output": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output"
+        },
+        "succeeded": {
+          "title": "Succeeded",
+          "type": "boolean"
+        },
+        "tool_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Name"
+        },
+        "worker_id": {
+          "minLength": 1,
+          "title": "Worker Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "worker_id",
+        "succeeded"
+      ],
+      "title": "WorkerResult",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "accounting": {
+      "$ref": "#/$defs/Accounting"
+    },
+    "artifact_type": {
+      "const": "agent_runtime_run",
+      "default": "agent_runtime_run",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "completed_at": {
+      "minLength": 1,
+      "title": "Completed At",
+      "type": "string"
+    },
+    "configuration_fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Configuration Fingerprint",
+      "type": "string"
+    },
+    "content_digests": {
+      "$ref": "#/$defs/ContentDigests"
+    },
+    "content_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Content Sha256",
+      "type": "string"
+    },
+    "events": {
+      "items": {
+        "$ref": "#/$defs/AgentEvent"
+      },
+      "title": "Events",
+      "type": "array"
+    },
+    "failures": {
+      "items": {
+        "$ref": "#/$defs/FailureRecord"
+      },
+      "title": "Failures",
+      "type": "array"
+    },
+    "final_decision": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FinalDecision"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "final_state": {
+      "$ref": "#/$defs/AgentState"
+    },
+    "model_attempts": {
+      "items": {
+        "$ref": "#/$defs/ModelAttempt"
+      },
+      "title": "Model Attempts",
+      "type": "array"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
+    },
+    "run_config": {
+      "$ref": "#/$defs/RunConfig"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.2.0",
+      "default": "0.2.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "semantic_fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Semantic Fingerprint",
+      "type": "string"
+    },
+    "started_at": {
+      "minLength": 1,
+      "title": "Started At",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/RunStatus"
+    },
+    "task": {
+      "$ref": "#/$defs/TaskSpec"
+    },
+    "tool_calls": {
+      "items": {
+        "$ref": "#/$defs/ToolCall"
+      },
+      "title": "Tool Calls",
+      "type": "array"
+    },
+    "tool_results": {
+      "items": {
+        "$ref": "#/$defs/ToolResult"
+      },
+      "title": "Tool Results",
+      "type": "array"
+    }
+  },
+  "required": [
+    "run_id",
+    "status",
+    "started_at",
+    "completed_at",
+    "task",
+    "run_config",
+    "final_state",
+    "final_decision",
+    "events",
+    "model_attempts",
+    "tool_calls",
+    "tool_results",
+    "failures",
+    "accounting",
+    "provenance",
+    "content_digests",
+    "configuration_fingerprint",
+    "semantic_fingerprint",
+    "content_sha256"
+  ],
+  "title": "RunArtifact",
+  "type": "object"
+}

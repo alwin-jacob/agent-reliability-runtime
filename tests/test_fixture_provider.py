@@ -23,7 +23,7 @@ def request(key: str = "key") -> ModelRequest:
 async def test_fixture_provider_returns_raw_success() -> None:
     provider = FixtureModelProvider.from_dict(
         {
-            "schema_version": "0.1.0",
+            "schema_version": "0.2.0",
             "provider_id": "fixture-test",
             "responses": {"key": [{"kind": "success", "raw_json": '{"ok":true}'}]},
         }
@@ -38,7 +38,7 @@ async def test_fixture_provider_returns_raw_success() -> None:
 async def test_fixture_provider_transient_then_success() -> None:
     provider = FixtureModelProvider.from_dict(
         {
-            "schema_version": "0.1.0",
+            "schema_version": "0.2.0",
             "provider_id": "fixture-test",
             "responses": {
                 "key": [
@@ -58,7 +58,7 @@ async def test_fixture_provider_transient_then_success() -> None:
 async def test_fixture_provider_permanent_failure() -> None:
     provider = FixtureModelProvider.from_dict(
         {
-            "schema_version": "0.1.0",
+            "schema_version": "0.2.0",
             "provider_id": "fixture-test",
             "responses": {"key": [{"kind": "permanent_failure", "code": "permanent"}]},
         }
@@ -72,7 +72,7 @@ async def test_fixture_provider_permanent_failure() -> None:
 async def test_fixture_provider_cancellation_is_observed() -> None:
     provider = FixtureModelProvider.from_dict(
         {
-            "schema_version": "0.1.0",
+            "schema_version": "0.2.0",
             "provider_id": "fixture-test",
             "responses": {"key": [{"kind": "wait_for_cancellation"}]},
         }
@@ -89,7 +89,7 @@ def test_fixture_token_counts_require_synthetic_label() -> None:
     with pytest.raises(ConfigurationError, match="labeled synthetic"):
         FixtureModelProvider.from_dict(
             {
-                "schema_version": "0.1.0",
+                "schema_version": "0.2.0",
                 "provider_id": "fixture-test",
                 "responses": {
                     "key": [

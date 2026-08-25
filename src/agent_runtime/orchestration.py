@@ -45,6 +45,12 @@ from agent_runtime.errors import (
 from agent_runtime.events import EventRecorder, isoformat_utc, utc_now
 from agent_runtime.invocation import AttemptObservation, invoke_with_policy
 from agent_runtime.providers.base import ModelProvider
+from agent_runtime.semantics import (
+    SemanticValidationError,
+    validate_stage_one_plan,
+    validate_successful_decision,
+    validate_worker_tool_request,
+)
 from agent_runtime.tools.registry import ToolRegistry
 
 
@@ -93,7 +99,6 @@ class PhaseManager:
         async with self._lock:
             previous = self._current
             validate_transition(previous, target)
-            self._current = target
             await self._recorder.record(
                 "state_transition",
                 source_component=source_component,
@@ -101,6 +106,7 @@ class PhaseManager:
                 span_id=self._run_span_id,
                 payload={"from": previous.value, "to": target.value},
             )
+            self._current = target
 
 
 class RuntimeServices:
@@ -377,7 +383,10 @@ async def supervisor_plan_node(state: GraphState, runtime: Runtime[RuntimeContex
             parent_span_id=services.run_span_id,
         )
         plan = _parse_model_output(response.raw_json, SupervisorPlan)
-        _validate_stage_one_plan(plan)
+        try:
+            validate_stage_one_plan(plan)
+        except SemanticValidationError as error:
+            raise ModelOutputError(str(error), code=error.code) from error
     except InvocationFailed as error:
         await _fail_phase(services, error.failure, span_id=span_id)
         return {"phase": RuntimePhase.FAILED, "worker_results": []}
@@ -507,6 +516,15 @@ async def _execute_worker(
             allowed_tools=assignment.allowed_tools,
             call=call,
         )
+        try:
+            validate_worker_tool_request(
+                task,
+                assignment.worker_id,
+                decision.tool_name,
+                decision.arguments,
+            )
+        except SemanticValidationError as error:
+            raise ModelOutputError(str(error), code=error.code) from error
 
         async def execute(_: int) -> dict[str, JsonValue]:
             raw_output = await tool.execute(validated_input)
@@ -555,7 +573,11 @@ async def supervisor_finalize_node(
     results = state.get("worker_results", [])
     by_id = {result.worker_id: result for result in results}
     required = {"order-worker", "policy-worker"}
-    if set(by_id) != required or any(not by_id[item].succeeded for item in required):
+    if (
+        len(results) != 2
+        or set(by_id) != required
+        or any(not by_id[item].succeeded for item in required)
+    ):
         error = OrchestrationError(
             "both successful Stage 1 worker results are required",
             code="required_worker_evidence_missing",
@@ -597,7 +619,10 @@ async def supervisor_finalize_node(
             parent_span_id=services.run_span_id,
         )
         decision = _parse_model_output(response.raw_json, FinalDecision)
-        _validate_final_decision(decision, state["task"], by_id)
+        try:
+            validate_successful_decision(state["task"], results, decision)
+        except SemanticValidationError as error:
+            raise ModelOutputError(str(error), code=error.code) from error
     except InvocationFailed as error:
         await _fail_phase(services, error.failure, span_id=span_id)
         return {"phase": RuntimePhase.FAILED, "final_decision": None}
@@ -662,54 +687,6 @@ def _parse_model_output(raw: str, model: type[ModelT]) -> ModelT:
             f"fixture provider output failed schema validation: {error}",
             code="model_output_schema_invalid",
         ) from error
-
-
-def _validate_stage_one_plan(plan: SupervisorPlan) -> None:
-    expected = {
-        "order-worker": (
-            ["lookup_order"],
-            "retrieve authoritative order facts",
-        ),
-        "policy-worker": (
-            ["lookup_return_policy"],
-            "retrieve the applicable return policy",
-        ),
-    }
-    observed = {item.worker_id: (item.allowed_tools, item.purpose) for item in plan.assignments}
-    if observed != expected or len(plan.assignments) != 2:
-        raise ModelOutputError(
-            "supervisor plan violated the Stage 1 assignment contract",
-            code="supervisor_plan_contract_invalid",
-        )
-
-
-def _validate_final_decision(
-    decision: FinalDecision,
-    task: TaskSpec,
-    results: dict[str, WorkerResult],
-) -> None:
-    if set(decision.evidence_worker_ids) != {"order-worker", "policy-worker"}:
-        raise ModelOutputError(
-            "final decision must reference both worker IDs",
-            code="final_decision_evidence_invalid",
-        )
-    if decision.order_id != task.order_id:
-        raise ModelOutputError(
-            "final decision order ID does not match the task",
-            code="final_decision_order_invalid",
-        )
-    order_output = results["order-worker"].output or {}
-    policy_output = results["policy-worker"].output or {}
-    if order_output.get("order_id") != decision.order_id:
-        raise ModelOutputError(
-            "final decision does not match authoritative order evidence",
-            code="final_decision_order_evidence_invalid",
-        )
-    if policy_output.get("return_window_days") != decision.policy_window_days:
-        raise ModelOutputError(
-            "final decision does not match authoritative policy evidence",
-            code="final_decision_policy_evidence_invalid",
-        )
 
 
 def _normalize_error(

@@ -1,6 +1,11 @@
 {
+  "as_of_date": "2026-08-25",
   "customer_request": "Can I return the unopened household item from order ORD-1001, and what should I do next?",
+  "item_category": "household",
+  "item_condition": "unopened",
+  "market": "US",
   "order_id": "ORD-1001",
-  "schema_version": "0.1.0",
+  "purchase_channel": "online",
+  "schema_version": "0.2.0",
   "task_id": "retail-return-v1"
 }

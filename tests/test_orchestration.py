@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 from conftest import EXPECTED_DECISION, make_loaded, success_script
 
-from agent_runtime.domain import AttemptOutcome, RunStatus
+from agent_runtime.domain import AttemptOutcome, RunStatus, RuntimePhase
+from agent_runtime.events import EventRecorder
+from agent_runtime.orchestration import PhaseManager
 from agent_runtime.runtime import execute_loaded
 
 
@@ -46,3 +49,20 @@ async def test_event_sequences_and_attempt_trace_are_complete(tmp_path: Path) ->
     for result in artifact.tool_results:
         assert (result.attempt_span_id, "tool_attempt_start") in spans
         assert (result.attempt_span_id, "tool_attempt_end") in spans
+
+
+@pytest.mark.asyncio
+async def test_phase_is_not_published_when_transition_event_recording_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = EventRecorder()
+    manager = PhaseManager(recorder, "run-span")
+
+    async def cancel_record(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(recorder, "record", cancel_record)
+    with pytest.raises(asyncio.CancelledError):
+        await manager.transition(RuntimePhase.PLANNING, source_component="runtime")
+    assert manager.current == RuntimePhase.INITIALIZED

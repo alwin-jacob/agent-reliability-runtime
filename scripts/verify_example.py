@@ -20,7 +20,10 @@ EXPECTED = FinalDecision(
     ),
     next_action="Start the online return for ORD-1001 and send the item back unopened.",
     order_id="ORD-1001",
+    as_of_date="2026-08-25",
+    days_since_delivery=15,
     policy_window_days=30,
+    applicable_fees="none",
     evidence_worker_ids=["order-worker", "policy-worker"],
 )
 

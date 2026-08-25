@@ -229,7 +229,7 @@ async def test_artifact_omits_identifying_and_external_configuration(tmp_path: P
 
 
 def test_generated_schema_matches_checked_schema() -> None:
-    checked = json.loads(Path("schemas/run-artifact-v0.1.0.json").read_text(encoding="utf-8"))
+    checked = json.loads(Path("schemas/run-artifact-v0.2.0.json").read_text(encoding="utf-8"))
     assert checked == generated_schema()
 
 
