@@ -725,14 +725,17 @@ async def supervisor_finalize_node(
         await _fail_phase(services, failure, span_id=span_id)
         return {"phase": RuntimePhase.FAILED, "final_decision": None}
 
-    await services.phase.transition(RuntimePhase.FINALIZING, source_component="supervisor")
-    await services.recorder.record(
-        "supervisor_finalization_start",
-        source_component="supervisor",
-        phase=RuntimePhase.FINALIZING,
-        span_id=span_id,
-        parent_span_id=services.run_span_id,
-    )
+    async def commit_finalization_start() -> None:
+        await services.phase.transition(RuntimePhase.FINALIZING, source_component="supervisor")
+        await services.recorder.record(
+            "supervisor_finalization_start",
+            source_component="supervisor",
+            phase=RuntimePhase.FINALIZING,
+            span_id=span_id,
+            parent_span_id=services.run_span_id,
+        )
+
+    await complete_cancellation_safe(commit_finalization_start)
     request = _model_request(
         logical_turn_id="turn-supervisor-finalize",
         source_component="supervisor",
@@ -795,19 +798,22 @@ async def supervisor_finalize_node(
 
 
 async def _fail_phase(services: RuntimeServices, failure: FailureRecord, *, span_id: str) -> None:
-    await services.add_failure(failure)
-    if services.phase.current not in {RuntimePhase.FAILED, RuntimePhase.CANCELLED}:
-        await services.phase.transition(
-            RuntimePhase.FAILED, source_component=failure.source_component
+    async def commit_failure() -> None:
+        await services.add_failure(failure)
+        if services.phase.current not in {RuntimePhase.FAILED, RuntimePhase.CANCELLED}:
+            await services.phase.transition(
+                RuntimePhase.FAILED, source_component=failure.source_component
+            )
+        await services.recorder.record(
+            "run_failure",
+            source_component=failure.source_component,
+            phase=RuntimePhase.FAILED,
+            span_id=span_id,
+            parent_span_id=services.run_span_id,
+            payload={"failure_id": failure.failure_id, "failure_code": failure.code},
         )
-    await services.recorder.record(
-        "run_failure",
-        source_component=failure.source_component,
-        phase=RuntimePhase.FAILED,
-        span_id=span_id,
-        parent_span_id=services.run_span_id,
-        payload={"failure_id": failure.failure_id, "failure_code": failure.code},
-    )
+
+    await complete_cancellation_safe(commit_failure)
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)

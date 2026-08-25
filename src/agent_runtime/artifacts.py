@@ -578,7 +578,9 @@ def _validate_effective_retry_group(
     for index, attempt in enumerate(attempts):
         failure = attempt.failure
         if failure is not None and (
-            failure.code == "invocation_cancelled" or failure.origin == FailureOrigin.CANCELLATION
+            failure.code == "invocation_cancelled"
+            or failure.origin == FailureOrigin.CANCELLATION
+            or failure.exception_type == "CancelledError"
         ):
             if (
                 failure.code != "invocation_cancelled"
@@ -1305,13 +1307,19 @@ def _validate_span_identities(artifact: RunArtifact) -> None:
     }
     model_attempt_spans = {attempt.attempt_id for attempt in artifact.model_attempts}
     tool_attempt_spans = {result.attempt_span_id for result in artifact.tool_results}
+    reached_finalization = any(
+        event.event_type == "state_transition" and event.phase == RuntimePhase.FINALIZING
+        for event in artifact.events
+    )
 
     if len(run_spans) != 1 or len(planning_spans) != 1:
         raise ArtifactError("run_start and planning lifecycle spans must each have one identity")
     if len(worker_spans) != len(worker_starts):
         raise ArtifactError("worker lifecycle spans must be distinct")
-    if len(finalization_spans) > 1:
-        raise ArtifactError("finalization lifecycle requires one span identity when reached")
+    if len(finalization_spans) != int(reached_finalization):
+        raise ArtifactError(
+            "finalization lifecycle requires one span identity exactly when reached"
+        )
 
     categories = {
         "run": run_spans,
@@ -1757,23 +1765,25 @@ def _validate_required_events(artifact: RunArtifact) -> None:
         )
     ):
         raise ArtifactError("artifact contains duplicate supervisor finalization lifecycle events")
+    finalizing_transitions = [item for item in transitions if item.phase == RuntimePhase.FINALIZING]
+    if finalizing_transitions:
+        if len(finalizing_transitions) != 1 or len(final_starts) != 1:
+            raise ArtifactError(
+                "reaching finalization requires one transition and one finalization-start event"
+            )
+        if (
+            finalizing_transitions[0].sequence >= final_starts[0].sequence
+            or any(item.sequence >= finalizing_transitions[0].sequence for item in worker_terminals)
+            or final_starts[0].parent_span_id != run_start.span_id
+            or final_starts[0].payload != {}
+        ):
+            raise ArtifactError("finalization must follow completed worker evidence")
+    elif final_starts:
+        raise ArtifactError("finalization-start event requires a finalizing transition")
     finalizer_request = requests_by_turn.get("turn-supervisor-finalize")
     if finalizer_request is not None:
         if len(final_starts) != 1:
             raise ArtifactError("finalizer request requires one finalization-start event")
-        if final_starts[0].parent_span_id != run_start.span_id:
-            raise ArtifactError("finalization-start parent span is invalid")
-        if final_starts[0].payload != {}:
-            raise ArtifactError("finalization-start payload is invalid")
-        finalizing_transitions = [
-            item for item in transitions if item.phase == RuntimePhase.FINALIZING
-        ]
-        if (
-            len(finalizing_transitions) != 1
-            or finalizing_transitions[0].sequence >= final_starts[0].sequence
-            or any(item.sequence >= finalizing_transitions[0].sequence for item in worker_terminals)
-        ):
-            raise ArtifactError("finalization must follow completed worker evidence")
         if any(
             item.parent_span_id != final_starts[0].span_id
             for item in attempts_by_request.get(finalizer_request.request_id, [])

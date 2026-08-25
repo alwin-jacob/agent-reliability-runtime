@@ -302,7 +302,7 @@ async def _cancelled_worker_artifact(tmp_path: Path) -> RunArtifact:
     return read_artifact(destination)
 
 
-@pytest.mark.parametrize("mutation", ["code", "origin", "retryable", "outcome"])
+@pytest.mark.parametrize("mutation", ["code", "origin", "retryable", "outcome", "code_and_origin"])
 @pytest.mark.asyncio
 async def test_resealed_invocation_cancellation_requires_exact_taxonomy_and_outcome(
     tmp_path: Path,
@@ -317,8 +317,12 @@ async def test_resealed_invocation_cancellation_requires_exact_taxonomy_and_outc
     failure = attempt.failure
     assert failure is not None
     failure_updates: dict[str, Any] = {
-        "code": "wrong_cancellation" if mutation == "code" else failure.code,
-        "origin": (FailureOrigin.MODEL_PROVIDER if mutation == "origin" else failure.origin),
+        "code": ("wrong_cancellation" if mutation in {"code", "code_and_origin"} else failure.code),
+        "origin": (
+            FailureOrigin.MODEL_PROVIDER
+            if mutation in {"origin", "code_and_origin"}
+            else failure.origin
+        ),
         "retryable": True if mutation == "retryable" else failure.retryable,
     }
     replacement = failure.model_copy(update=failure_updates)
@@ -956,6 +960,104 @@ async def test_cancelled_run_may_stop_during_backoff_after_retryable_failure(
     assert len(planner_attempts) == 1
     assert planner_attempts[0].failure is not None
     assert planner_attempts[0].failure.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_classified_failure_terminalization_persists_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = success_script()
+    script["responses"]["supervisor_plan"] = [{"kind": "permanent_failure", "code": "planner_down"}]
+    gate = _CancellationGate()
+    original = EventRecorder.record
+
+    async def blocked_record(
+        self: EventRecorder,
+        event_type: str,
+        **kwargs: Any,
+    ) -> AgentEvent:
+        if event_type == "run_failure":
+            await gate.pause_once()
+        return await original(self, event_type, **kwargs)
+
+    monkeypatch.setattr(EventRecorder, "record", blocked_record)
+    destination = tmp_path / "failed.json"
+    task = asyncio.create_task(
+        execute_loaded(make_loaded(tmp_path, script=script), output_path=destination)
+    )
+    artifact, _ = await _cancel_and_read(task, gate, destination)
+
+    assert artifact.status == RunStatus.FAILED
+    assert any(failure.code == "planner_down" for failure in artifact.failures)
+    assert len([event for event in artifact.events if event.event_type == "run_failure"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_unexpected_failure_terminalization_persists_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_acceptance(plan: Any) -> None:
+        del plan
+        raise RuntimeError("deterministic acceptance fault")
+
+    gate = _CancellationGate()
+    original = EventRecorder.record
+
+    async def blocked_record(
+        self: EventRecorder,
+        event_type: str,
+        **kwargs: Any,
+    ) -> AgentEvent:
+        if event_type == "run_failure":
+            await gate.pause_once()
+        return await original(self, event_type, **kwargs)
+
+    monkeypatch.setattr("agent_runtime.orchestration.validate_stage_one_plan", fail_acceptance)
+    monkeypatch.setattr(EventRecorder, "record", blocked_record)
+    destination = tmp_path / "failed.json"
+    task = asyncio.create_task(execute_loaded(make_loaded(tmp_path), output_path=destination))
+    artifact, _ = await _cancel_and_read(task, gate, destination)
+
+    assert artifact.status == RunStatus.FAILED
+    assert any(failure.code == "unexpected_internal_error" for failure in artifact.failures)
+    assert len([event for event in artifact.events if event.event_type == "run_failure"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_finalization_entry_commits_lifecycle_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = _CancellationGate()
+    original = EventRecorder.record
+
+    async def blocked_record(
+        self: EventRecorder,
+        event_type: str,
+        **kwargs: Any,
+    ) -> AgentEvent:
+        if event_type == "supervisor_finalization_start":
+            await gate.pause_once()
+        return await original(self, event_type, **kwargs)
+
+    monkeypatch.setattr(EventRecorder, "record", blocked_record)
+    destination = tmp_path / "cancelled.json"
+    task = asyncio.create_task(execute_loaded(make_loaded(tmp_path), output_path=destination))
+    artifact, _ = await _cancel_and_read(task, gate, destination)
+
+    assert artifact.status == RunStatus.CANCELLED
+    finalizing = [
+        event
+        for event in artifact.events
+        if event.event_type == "state_transition" and event.phase == RuntimePhase.FINALIZING
+    ]
+    final_starts = [
+        event for event in artifact.events if event.event_type == "supervisor_finalization_start"
+    ]
+    assert len(finalizing) == 1
+    assert len(final_starts) == 1
 
 
 @pytest.mark.asyncio
