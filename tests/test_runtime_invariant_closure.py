@@ -394,19 +394,48 @@ async def test_tool_output_failure_cannot_be_retryable_or_followed_by_another_at
         validate_artifact(_reseal(_replace_failure(artifact, failure, replacement)))
 
 
+@pytest.mark.parametrize(
+    ("raw_json", "failure_code"),
+    [
+        ("{", "malformed_model_json"),
+        ('{"assignments":[]}', "model_output_schema_invalid"),
+        (
+            json.dumps(
+                {
+                    "assignments": [
+                        {
+                            "worker_id": "order-worker",
+                            "allowed_tools": ["lookup_order"],
+                            "purpose": "wrong",
+                        },
+                        {
+                            "worker_id": "policy-worker",
+                            "allowed_tools": ["lookup_return_policy"],
+                            "purpose": "retrieve the applicable return policy",
+                        },
+                    ]
+                }
+            ),
+            "supervisor_plan_contract_invalid",
+        ),
+    ],
+    ids=["malformed-json", "pydantic-schema", "semantic-contract"],
+)
 @pytest.mark.asyncio
 async def test_model_output_failure_cannot_predate_the_response_it_classifies(
     tmp_path: Path,
+    raw_json: str,
+    failure_code: str,
 ) -> None:
     script = success_script()
-    script["responses"]["supervisor_plan"] = [{"kind": "success", "raw_json": "{"}]
+    script["responses"]["supervisor_plan"] = [{"kind": "success", "raw_json": raw_json}]
     artifact = await execute_loaded(
-        make_loaded(tmp_path, script=script), output_path=tmp_path / "malformed.json"
+        make_loaded(tmp_path, script=script), output_path=tmp_path / f"{failure_code}.json"
     )
     terminal = next(
         item for item in artifact.model_attempts if item.logical_turn_id == "turn-supervisor-plan"
     )
-    failure = next(item for item in artifact.failures if item.code == "malformed_model_json")
+    failure = next(item for item in artifact.failures if item.code == failure_code)
     assert artifact.started_at < terminal.completed_at
     replacement = failure.model_copy(update={"timestamp": artifact.started_at})
 
@@ -419,9 +448,15 @@ async def test_model_output_failure_cannot_predate_the_response_it_classifies(
     [
         ("turn-supervisor-plan", "supervisor_planning_start"),
         ("turn-order-worker", "worker_start"),
+        ("turn-policy-worker", "worker_start"),
         ("turn-supervisor-finalize", "supervisor_finalization_start"),
     ],
-    ids=["case-15-planner", "case-16-worker", "case-17-finalizer"],
+    ids=[
+        "case-15-planner",
+        "case-16-order-worker",
+        "case-16-policy-worker",
+        "case-17-finalizer",
+    ],
 )
 @pytest.mark.asyncio
 async def test_model_request_cannot_predate_its_lifecycle_start(
