@@ -18,13 +18,13 @@ def _responses(script: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
 @pytest.mark.parametrize(
     ("tool_name", "arguments", "code"),
     [
-        ("does_not_exist", {}, "unknown_tool"),
+        ("does_not_exist", {}, "worker_tool_request_contract_invalid"),
         (
             "lookup_return_policy",
             {"market": "US", "item_category": "household", "purchase_channel": "online"},
-            "tool_disallowed",
+            "worker_tool_request_contract_invalid",
         ),
-        ("lookup_order", {"wrong": "value"}, "tool_input_invalid"),
+        ("lookup_order", {"wrong": "value"}, "worker_tool_request_contract_invalid"),
     ],
 )
 @pytest.mark.asyncio

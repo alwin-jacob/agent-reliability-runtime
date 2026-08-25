@@ -45,7 +45,11 @@ from agent_runtime.errors import (
 )
 from agent_runtime.events import EventRecorder, isoformat_utc, utc_now
 from agent_runtime.integrity import canonical_sha256
-from agent_runtime.invocation import AttemptObservation, invoke_with_policy
+from agent_runtime.invocation import (
+    AttemptObservation,
+    complete_cancellation_safe,
+    invoke_with_policy,
+)
 from agent_runtime.providers.base import ModelProvider
 from agent_runtime.semantics import (
     CANONICAL_EVIDENCE_WORKER_IDS,
@@ -191,7 +195,12 @@ class RuntimeServices:
             self.max_active_workers = max(self.max_active_workers, self.active_workers)
             active = self.active_workers
         if self.concurrency_probe is not None:
-            await self.concurrency_probe.entered(worker_id, active)
+            try:
+                await self.concurrency_probe.entered(worker_id, active)
+            except BaseException:
+                async with self._activity_lock:
+                    self.active_workers -= 1
+                raise
 
     async def worker_exited(self, worker_id: str) -> None:
         async with self._activity_lock:
@@ -303,30 +312,34 @@ class RuntimeServices:
                 response=observation.value,
                 failure=failure,
             )
-            async with self._evidence_lock:
-                self._model_attempts.append(record)
-                if failure is not None:
-                    self._append_failure_locked(failure)
             event_type = {
                 AttemptOutcome.SUCCEEDED: "model_attempt_end",
                 AttemptOutcome.FAILED: "model_attempt_failure",
                 AttemptOutcome.TIMED_OUT: "model_attempt_timeout",
             }[observation.outcome]
-            await self.recorder.record(
-                event_type,
-                source_component=request.source_component,
-                phase=phase,
-                span_id=attempt_id,
-                parent_span_id=span_id,
-                payload={
-                    "attempt": observation.attempt,
-                    "logical_turn_id": request.logical_turn_id,
-                    "request_id": request.request_id,
-                    "outcome": observation.outcome.value,
-                    "failure_id": failure.failure_id if failure else None,
-                    "failure_code": failure.code if failure else None,
-                },
-            )
+
+            async def commit_attempt() -> None:
+                async with self._evidence_lock:
+                    self._model_attempts.append(record)
+                    if failure is not None:
+                        self._append_failure_locked(failure)
+                await self.recorder.record(
+                    event_type,
+                    source_component=request.source_component,
+                    phase=phase,
+                    span_id=attempt_id,
+                    parent_span_id=span_id,
+                    payload={
+                        "attempt": observation.attempt,
+                        "logical_turn_id": request.logical_turn_id,
+                        "request_id": request.request_id,
+                        "outcome": observation.outcome.value,
+                        "failure_id": failure.failure_id if failure else None,
+                        "failure_code": failure.code if failure else None,
+                    },
+                )
+
+            await complete_cancellation_safe(commit_attempt)
 
         try:
             return await invoke_with_policy(
@@ -396,31 +409,35 @@ class RuntimeServices:
                 output=observation.value,
                 failure=failure,
             )
-            async with self._evidence_lock:
-                self._tool_results.append(result)
-                if failure is not None:
-                    self._append_failure_locked(failure)
             event_type = {
                 AttemptOutcome.SUCCEEDED: "tool_attempt_end",
                 AttemptOutcome.FAILED: "tool_attempt_failure",
                 AttemptOutcome.TIMED_OUT: "tool_attempt_timeout",
             }[observation.outcome]
-            await self.recorder.record(
-                event_type,
-                source_component=call.tool_name,
-                phase=phase,
-                span_id=attempt_span,
-                parent_span_id=parent_span_id,
-                payload={
-                    "attempt": observation.attempt,
-                    "tool_call_id": call.call_id,
-                    "worker_id": call.worker_id,
-                    "tool_name": call.tool_name,
-                    "outcome": observation.outcome.value,
-                    "failure_id": failure.failure_id if failure else None,
-                    "failure_code": failure.code if failure else None,
-                },
-            )
+
+            async def commit_result() -> None:
+                async with self._evidence_lock:
+                    self._tool_results.append(result)
+                    if failure is not None:
+                        self._append_failure_locked(failure)
+                await self.recorder.record(
+                    event_type,
+                    source_component=call.tool_name,
+                    phase=phase,
+                    span_id=attempt_span,
+                    parent_span_id=parent_span_id,
+                    payload={
+                        "attempt": observation.attempt,
+                        "tool_call_id": call.call_id,
+                        "worker_id": call.worker_id,
+                        "tool_name": call.tool_name,
+                        "outcome": observation.outcome.value,
+                        "failure_id": failure.failure_id if failure else None,
+                        "failure_code": failure.code if failure else None,
+                    },
+                )
+
+            await complete_cancellation_safe(commit_result)
 
         try:
             return await invoke_with_policy(
@@ -501,25 +518,31 @@ async def supervisor_plan_node(state: GraphState, runtime: Runtime[RuntimeContex
         )
         await _fail_phase(services, failure, span_id=span_id)
         return {"phase": RuntimePhase.FAILED, "worker_results": []}
-    await services.recorder.record(
-        "supervisor_planning_end",
-        source_component="supervisor",
-        phase=RuntimePhase.PLANNING,
-        span_id=span_id,
-        parent_span_id=services.run_span_id,
-        payload={"assignment_count": len(plan.assignments)},
-    )
-    await services.accepted_state.accept_plan(plan)
-    await services.phase.transition(RuntimePhase.EXECUTING_WORKERS, source_component="supervisor")
-    for assignment in plan.assignments:
+
+    async def commit_plan() -> None:
         await services.recorder.record(
-            "worker_dispatch",
+            "supervisor_planning_end",
             source_component="supervisor",
-            phase=RuntimePhase.EXECUTING_WORKERS,
+            phase=RuntimePhase.PLANNING,
             span_id=span_id,
             parent_span_id=services.run_span_id,
-            payload={"worker_id": assignment.worker_id},
+            payload={"assignment_count": len(plan.assignments)},
         )
+        await services.accepted_state.accept_plan(plan)
+        await services.phase.transition(
+            RuntimePhase.EXECUTING_WORKERS, source_component="supervisor"
+        )
+        for assignment in plan.assignments:
+            await services.recorder.record(
+                "worker_dispatch",
+                source_component="supervisor",
+                phase=RuntimePhase.EXECUTING_WORKERS,
+                span_id=span_id,
+                parent_span_id=services.run_span_id,
+                payload={"worker_id": assignment.worker_id},
+            )
+
+    await complete_cancellation_safe(commit_plan)
     return {
         "phase": RuntimePhase.EXECUTING_WORKERS,
         "plan": plan,
@@ -566,19 +589,23 @@ async def worker_node(state: GraphState, runtime: Runtime[RuntimeContext]) -> Gr
             )
             result = await _execute_worker(state["task"], assignment, services, span_id)
             event_type = "worker_end" if result.succeeded else "worker_failure"
-            await services.recorder.record(
-                event_type,
-                source_component=worker_id,
-                phase=RuntimePhase.EXECUTING_WORKERS,
-                span_id=span_id,
-                parent_span_id=services.run_span_id,
-                payload={
-                    "succeeded": result.succeeded,
-                    "failure_id": result.failure.failure_id if result.failure else None,
-                    "failure_code": result.failure.code if result.failure else None,
-                },
-            )
-            await services.accepted_state.accept_worker_result(result)
+
+            async def commit_worker_result() -> None:
+                await services.recorder.record(
+                    event_type,
+                    source_component=worker_id,
+                    phase=RuntimePhase.EXECUTING_WORKERS,
+                    span_id=span_id,
+                    parent_span_id=services.run_span_id,
+                    payload={
+                        "succeeded": result.succeeded,
+                        "failure_id": result.failure.failure_id if result.failure else None,
+                        "failure_code": result.failure.code if result.failure else None,
+                    },
+                )
+                await services.accepted_state.accept_worker_result(result)
+
+            await complete_cancellation_safe(commit_worker_result)
             return {"worker_results": [result]}
         finally:
             if entered:
@@ -610,6 +637,15 @@ async def _execute_worker(
             parent_span_id=services.run_span_id,
         )
         decision = _parse_model_output(response.raw_json, WorkerToolRequest)
+        try:
+            validate_worker_tool_request(
+                task,
+                assignment.worker_id,
+                decision.tool_name,
+                decision.arguments,
+            )
+        except SemanticValidationError as error:
+            raise ModelOutputError(str(error), code=error.code) from error
         call = ToolCall(
             call_id=f"tool-call-{uuid4().hex}",
             worker_id=assignment.worker_id,
@@ -621,15 +657,6 @@ async def _execute_worker(
             allowed_tools=assignment.allowed_tools,
             call=call,
         )
-        try:
-            validate_worker_tool_request(
-                task,
-                assignment.worker_id,
-                decision.tool_name,
-                decision.arguments,
-            )
-        except SemanticValidationError as error:
-            raise ModelOutputError(str(error), code=error.code) from error
         await services.add_tool_call(call)
         persisted_call_id = call.call_id
 
@@ -743,23 +770,27 @@ async def supervisor_finalize_node(
         )
         await _fail_phase(services, failure, span_id=span_id)
         return {"phase": RuntimePhase.FAILED, "final_decision": None}
-    await services.recorder.record(
-        "supervisor_finalization_end",
-        source_component="supervisor",
-        phase=RuntimePhase.FINALIZING,
-        span_id=span_id,
-        parent_span_id=services.run_span_id,
-        payload={"decision_code": decision.decision_code},
-    )
-    await services.accepted_state.accept_final_decision(decision)
-    await services.phase.transition(RuntimePhase.SUCCEEDED, source_component="supervisor")
-    await services.recorder.record(
-        "run_success",
-        source_component="runtime",
-        phase=RuntimePhase.SUCCEEDED,
-        span_id=services.run_span_id,
-        payload={"decision_code": decision.decision_code},
-    )
+
+    async def commit_success() -> None:
+        await services.recorder.record(
+            "supervisor_finalization_end",
+            source_component="supervisor",
+            phase=RuntimePhase.FINALIZING,
+            span_id=span_id,
+            parent_span_id=services.run_span_id,
+            payload={"decision_code": decision.decision_code},
+        )
+        await services.accepted_state.accept_final_decision(decision)
+        await services.phase.transition(RuntimePhase.SUCCEEDED, source_component="supervisor")
+        await services.recorder.record(
+            "run_success",
+            source_component="runtime",
+            phase=RuntimePhase.SUCCEEDED,
+            span_id=services.run_span_id,
+            payload={"decision_code": decision.decision_code},
+        )
+
+    await complete_cancellation_safe(commit_success)
     return {"phase": RuntimePhase.SUCCEEDED, "final_decision": decision}
 
 

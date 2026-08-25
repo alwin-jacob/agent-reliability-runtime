@@ -39,6 +39,26 @@ class AttemptObservation(Generic[T]):
     failure: FailureRecord | None
 
 
+async def complete_cancellation_safe(operation: Callable[[], Awaitable[T]]) -> T:
+    """Finish one bounded in-memory/persistence commit before propagating cancellation."""
+
+    async def run_commit() -> T:
+        return await operation()
+
+    commit_task: asyncio.Task[T] = asyncio.create_task(run_commit())
+    try:
+        return await asyncio.shield(commit_task)
+    except asyncio.CancelledError as cancellation:
+        try:
+            await commit_task
+        except BaseException as commit_error:
+            cancellation.add_note(
+                "cancellation-safe commit failed: "
+                f"{type(commit_error).__name__}: {sanitize_message(commit_error)}"
+            )
+        raise
+
+
 async def invoke_with_policy(
     operation: Callable[[int], Awaitable[T]],
     policy: RetryPolicy,

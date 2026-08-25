@@ -19,14 +19,17 @@ from agent_runtime.domain import (
     AgentEvent,
     AttemptOutcome,
     ContentDigests,
+    FailureOrigin,
     FailureRecord,
     FinalDecision,
     ModelAttempt,
     ModelRequestRecord,
+    RetryPolicy,
     RunArtifact,
     RunConfig,
     RunStatus,
     RuntimePhase,
+    SupervisorPlan,
     TaskSpec,
     ToolCall,
     ToolResult,
@@ -45,11 +48,39 @@ from agent_runtime.semantics import (
     validate_successful_decision,
     validate_worker_tool_request,
 )
+from agent_runtime.tools.retail import LookupOrderOutput, LookupReturnPolicyOutput
 
 _PRIVATE_PATH = re.compile(r"(?:/(?:Users|home)/[^/\s]+|[A-Za-z]:\\Users\\[^\\\s]+)")
 _SECRET_VALUE = re.compile(
     r"(?:\bsk-[A-Za-z0-9_-]{12,}\b|\bAKIA[0-9A-Z]{16}\b|\bBearer\s+[A-Za-z0-9._~+/-]{12,})"
 )
+_ALLOWED_EVENT_TYPES = frozenset(
+    {
+        "run_start",
+        "state_transition",
+        "supervisor_planning_start",
+        "supervisor_planning_end",
+        "worker_dispatch",
+        "worker_start",
+        "worker_end",
+        "worker_failure",
+        "model_attempt_start",
+        "model_attempt_end",
+        "model_attempt_failure",
+        "model_attempt_timeout",
+        "tool_attempt_start",
+        "tool_attempt_end",
+        "tool_attempt_failure",
+        "tool_attempt_timeout",
+        "supervisor_finalization_start",
+        "supervisor_finalization_end",
+        "run_success",
+        "run_failure",
+        "run_cancellation",
+        "artifact_persistence_start",
+    }
+)
+_FIXTURE_DIGEST_KEYS = frozenset({"model", "orders", "policies"})
 
 
 def configuration_fingerprint(digests: ContentDigests, task: TaskSpec, config: RunConfig) -> str:
@@ -206,7 +237,8 @@ def validate_artifact(artifact: RunArtifact) -> None:
     if sequences != list(range(1, len(sequences) + 1)):
         raise ArtifactError("artifact event sequences must be unique and strictly increasing")
     _validate_unique_identifiers(artifact)
-    _validate_timestamps(artifact)
+    _validate_event_vocabulary(artifact)
+    _validate_span_identities(artifact)
     expected_accounting = build_accounting(
         artifact.model_requests,
         artifact.model_attempts,
@@ -242,9 +274,14 @@ def validate_artifact(artifact: RunArtifact) -> None:
     )
     if artifact.configuration_fingerprint != expected_config:
         raise ArtifactError("artifact configuration fingerprint is inconsistent")
+    if set(artifact.content_digests.fixture_sha256) != _FIXTURE_DIGEST_KEYS:
+        raise ArtifactError("fixture digest keys must be exactly model, orders, and policies")
     if artifact.status == RunStatus.SUCCEEDED:
         _validate_success_records(artifact)
     _validate_request_and_attempt_trace(artifact)
+    _validate_timestamps(artifact)
+    _validate_fixture_response_evidence(artifact)
+    _validate_successful_tool_outputs(artifact)
     _validate_worker_evidence(artifact)
     _validate_response_action_causality(artifact)
     _validate_failure_graph(artifact)
@@ -312,6 +349,10 @@ def _validate_request_and_attempt_trace(artifact: RunArtifact) -> None:
                 raise ArtifactError("successful model attempt has contradictory evidence")
         elif attempt.response is not None or attempt.failure is None:
             raise ArtifactError("failed model attempt has contradictory evidence")
+        if _parse_utc_timestamp(
+            attempt.started_at, "model attempt started_at"
+        ) > _parse_utc_timestamp(attempt.completed_at, "model attempt completed_at"):
+            raise ArtifactError("model attempt started_at must not be after completed_at")
         events = [
             item
             for item in artifact.events
@@ -353,6 +394,14 @@ def _validate_request_and_attempt_trace(artifact: RunArtifact) -> None:
 
     for request in artifact.model_requests:
         attempts = sorted(model_groups.get(request.request_id, []), key=lambda item: item.attempt)
+        _validate_effective_retry_group(
+            attempts,
+            artifact.run_config.model_retry,
+            artifact.status,
+            label="model",
+            timeout_code="model_attempt_timeout",
+            timeout_origin=FailureOrigin.MODEL_PROVIDER,
+        )
         created = _parse_utc_timestamp(request.created_at, "model request created_at")
         if attempts and created > _parse_utc_timestamp(
             attempts[0].started_at, "model attempt started_at"
@@ -458,6 +507,14 @@ def _validate_request_and_attempt_trace(artifact: RunArtifact) -> None:
         raise ArtifactError("artifact contains an orphan tool-attempt event")
     for tool_attempts in tool_groups.values():
         ordered = sorted(tool_attempts, key=lambda item: item.attempt)
+        _validate_effective_retry_group(
+            ordered,
+            artifact.run_config.tool_retry,
+            artifact.status,
+            label="tool",
+            timeout_code="tool_attempt_timeout",
+            timeout_origin=FailureOrigin.TOOL_EXECUTION,
+        )
         numbers = [item.attempt for item in ordered]
         if numbers != list(range(1, len(numbers) + 1)):
             raise ArtifactError("tool attempt numbers must be contiguous from 1")
@@ -492,6 +549,68 @@ def _validate_request_and_attempt_trace(artifact: RunArtifact) -> None:
             previous_completed_at = _parse_utc_timestamp(
                 result.completed_at, "tool result completed_at"
             )
+
+
+AttemptRecord = TypeVar("AttemptRecord", ModelAttempt, ToolResult)
+
+
+def _validate_effective_retry_group(
+    attempts: list[AttemptRecord],
+    policy: RetryPolicy,
+    status: RunStatus,
+    *,
+    label: str,
+    timeout_code: str,
+    timeout_origin: FailureOrigin,
+) -> None:
+    """Apply one effective RunConfig retry policy to one logical invocation group."""
+
+    numbers = [item.attempt for item in attempts]
+    if numbers != list(range(1, len(numbers) + 1)):
+        raise ArtifactError(f"{label} attempt numbers must be contiguous from 1")
+    if len(attempts) > policy.max_attempts:
+        raise ArtifactError(f"{label} attempts exceed effective max_attempts")
+
+    successes = [item for item in attempts if item.outcome == AttemptOutcome.SUCCEEDED]
+    if len(successes) > 1 or (successes and successes[0] != attempts[-1]):
+        raise ArtifactError(f"successful {label} attempt must be unique and terminal")
+
+    for index, attempt in enumerate(attempts):
+        failure = attempt.failure
+        if failure is not None and (
+            failure.code == "invocation_cancelled" or failure.origin == FailureOrigin.CANCELLATION
+        ):
+            if (
+                failure.code != "invocation_cancelled"
+                or failure.origin != FailureOrigin.CANCELLATION
+                or failure.retryable
+                or attempt.outcome != AttemptOutcome.FAILED
+                or index != len(attempts) - 1
+            ):
+                raise ArtifactError(f"{label} invocation cancellation evidence is inconsistent")
+        if attempt.outcome == AttemptOutcome.TIMED_OUT:
+            if (
+                failure is None
+                or failure.code != timeout_code
+                or failure.origin != timeout_origin
+                or not failure.retryable
+            ):
+                raise ArtifactError(f"{label} timeout has inconsistent runtime taxonomy")
+        if index < len(attempts) - 1:
+            if failure is None or not failure.retryable:
+                raise ArtifactError(f"nonterminal {label} attempt must have a retryable failure")
+
+    if (
+        status == RunStatus.FAILED
+        and attempts
+        and attempts[-1].outcome != AttemptOutcome.SUCCEEDED
+        and attempts[-1].failure is not None
+        and attempts[-1].failure.retryable
+        and len(attempts) < policy.max_attempts
+    ):
+        raise ArtifactError(
+            f"failed run stopped on retryable {label} failure before configured maximum"
+        )
 
 
 def _validate_attempt_event(
@@ -657,6 +776,182 @@ def _validate_response_action_causality(artifact: RunArtifact) -> None:
             raise ArtifactError("success requires exactly the four Stage 1 logical model turns")
         for request in artifact.model_requests:
             _terminal_success(request, attempts_by_request)
+
+    _validate_failed_response_causality(artifact, requests_by_turn, attempts_by_request)
+
+
+def _validate_failed_response_causality(
+    artifact: RunArtifact,
+    requests_by_turn: dict[str, ModelRequestRecord],
+    attempts_by_request: dict[str, list[ModelAttempt]],
+) -> None:
+    """Reclassify stored terminal responses and reconcile failed-path acceptance."""
+
+    calls_by_worker: dict[str, list[ToolCall]] = defaultdict(list)
+    for call in artifact.tool_calls:
+        calls_by_worker[call.worker_id].append(call)
+
+    for turn, request in requests_by_turn.items():
+        attempts = sorted(
+            attempts_by_request.get(request.request_id, []), key=lambda item: item.attempt
+        )
+        if not attempts or attempts[-1].outcome != AttemptOutcome.SUCCEEDED:
+            continue
+        terminal = attempts[-1]
+        if terminal.response is None:  # guarded by strict attempt validation
+            raise ArtifactError("terminal successful model attempt is missing its response")
+        raw_json = terminal.response.raw_json
+        try:
+            raw_value = json.loads(raw_json)
+        except json.JSONDecodeError:
+            _require_output_failure(artifact, request, "malformed_model_json")
+            continue
+
+        if turn == "turn-supervisor-plan":
+            try:
+                parsed_plan = SupervisorPlan.model_validate(raw_value)
+            except (ValidationError, ValueError):
+                _require_output_failure(artifact, request, "model_output_schema_invalid")
+                continue
+            try:
+                validate_stage_one_plan(parsed_plan)
+            except SemanticValidationError as error:
+                _require_output_failure(artifact, request, error.code)
+                continue
+            _reject_contradictory_output_failures(artifact, request)
+            if artifact.final_state.plan is None:
+                _require_cancelled_or_unexpected_gap(artifact, request, terminal, "accepted plan")
+            elif artifact.final_state.plan != parsed_plan:
+                raise ArtifactError("valid planner response contradicts the accepted plan")
+            continue
+
+        if turn in {"turn-order-worker", "turn-policy-worker"}:
+            worker_id = request.source_component
+            try:
+                parsed_call = WorkerToolRequest.model_validate(raw_value)
+            except (ValidationError, ValueError):
+                _require_output_failure(artifact, request, "model_output_schema_invalid")
+                continue
+            try:
+                validate_worker_tool_request(
+                    artifact.task,
+                    worker_id,
+                    parsed_call.tool_name,
+                    parsed_call.arguments,
+                )
+            except SemanticValidationError as error:
+                _require_output_failure(artifact, request, error.code)
+                continue
+            _reject_contradictory_output_failures(artifact, request)
+            calls = calls_by_worker.get(worker_id, [])
+            if not calls:
+                _require_cancelled_or_unexpected_gap(
+                    artifact, request, terminal, "accepted tool call"
+                )
+            elif len(calls) != 1 or (
+                calls[0].tool_name,
+                calls[0].input,
+            ) != (parsed_call.tool_name, parsed_call.arguments):
+                raise ArtifactError("valid worker response contradicts the accepted tool call")
+            continue
+
+        if turn == "turn-supervisor-finalize":
+            try:
+                parsed_decision = FinalDecision.model_validate(raw_value)
+            except (ValidationError, ValueError):
+                _require_output_failure(artifact, request, "model_output_schema_invalid")
+                continue
+            try:
+                validate_successful_decision(
+                    artifact.task,
+                    artifact.final_state.worker_results,
+                    parsed_decision,
+                )
+            except SemanticValidationError as error:
+                _require_output_failure(artifact, request, error.code)
+                continue
+            _reject_contradictory_output_failures(artifact, request)
+            if artifact.final_decision is None:
+                _require_cancelled_or_unexpected_gap(
+                    artifact, request, terminal, "accepted final decision"
+                )
+            elif artifact.final_decision != parsed_decision:
+                raise ArtifactError(
+                    "valid finalizer response contradicts the accepted final decision"
+                )
+
+
+def _output_failures_for_request(
+    artifact: RunArtifact, request: ModelRequestRecord
+) -> list[FailureRecord]:
+    """Return downstream failure claims made by the request's accepting component."""
+
+    return [
+        failure
+        for failure in artifact.failures
+        if failure.phase == request.phase
+        and failure.source_component == request.source_component
+        and failure.model_attempt_id is None
+    ]
+
+
+def _require_output_failure(
+    artifact: RunArtifact,
+    request: ModelRequestRecord,
+    expected_code: str,
+) -> None:
+    failures = _output_failures_for_request(artifact, request)
+    matching = [
+        failure
+        for failure in failures
+        if failure.code == expected_code
+        and failure.origin == FailureOrigin.MODEL_OUTPUT
+        and not failure.retryable
+    ]
+    if artifact.status == RunStatus.CANCELLED and not failures:
+        return
+    if len(matching) != 1 or len(failures) != 1:
+        raise ArtifactError(
+            "terminal model-output failure code is not causally linked to parse result "
+            f"{expected_code}"
+        )
+
+
+def _reject_contradictory_output_failures(
+    artifact: RunArtifact, request: ModelRequestRecord
+) -> None:
+    if _output_failures_for_request(artifact, request):
+        raise ArtifactError("valid terminal response contradicts persisted model-output failure")
+
+
+def _require_cancelled_or_unexpected_gap(
+    artifact: RunArtifact,
+    request: ModelRequestRecord,
+    terminal: ModelAttempt,
+    label: str,
+) -> None:
+    if artifact.status == RunStatus.CANCELLED:
+        return
+    run_span = next(
+        (event.span_id for event in artifact.events if event.event_type == "run_start"), None
+    )
+    terminal_completed = _parse_utc_timestamp(
+        terminal.completed_at, "terminal model attempt completed_at"
+    )
+    linked = [
+        failure
+        for failure in artifact.failures
+        if failure.code == "unexpected_internal_error"
+        and failure.origin == FailureOrigin.UNEXPECTED_INTERNAL
+        and failure.phase == request.phase
+        and failure.source_component == "runtime"
+        and failure.span_id == run_span
+        and not failure.retryable
+        and _parse_utc_timestamp(failure.timestamp, "unexpected failure timestamp")
+        >= terminal_completed
+    ]
+    if artifact.status != RunStatus.FAILED or len(linked) != 1:
+        raise ArtifactError(f"valid terminal response is missing its {label}")
 
 
 ModelValue = TypeVar("ModelValue", bound=BaseModel)
@@ -907,6 +1202,63 @@ def _validate_worker_evidence(artifact: RunArtifact) -> None:
             raise ArtifactError("successful worker output does not match accepted tool evidence")
 
 
+def _validate_successful_tool_outputs(artifact: RunArtifact) -> None:
+    """Strictly reparse every successful tool attempt, including partial failed runs."""
+
+    output_models: dict[str, type[BaseModel]] = {
+        "lookup_order": LookupOrderOutput,
+        "lookup_return_policy": LookupReturnPolicyOutput,
+    }
+    for result in artifact.tool_results:
+        if result.outcome != AttemptOutcome.SUCCEEDED:
+            if result.output is not None:
+                raise ArtifactError("failed or timed-out tool attempt must not retain output")
+            continue
+        model = output_models.get(result.tool_name)
+        if model is None:
+            raise ArtifactError("unknown successful tool name is not valid Stage 1 evidence")
+        try:
+            parsed = model.model_validate(result.output)
+        except ValidationError as error:
+            raise ArtifactError(f"successful {result.tool_name} tool output is invalid") from error
+        if parsed.model_dump(mode="json") != result.output:
+            raise ArtifactError(
+                f"successful {result.tool_name} tool output is not canonical strict evidence"
+            )
+
+
+def _validate_fixture_response_evidence(artifact: RunArtifact) -> None:
+    requests_by_id = {item.request_id: item for item in artifact.model_requests}
+    model_ids: set[str] = set()
+    for attempt in artifact.model_attempts:
+        if attempt.outcome != AttemptOutcome.SUCCEEDED:
+            continue
+        response = attempt.response
+        request = requests_by_id.get(attempt.request_id)
+        if response is None or request is None:
+            raise ArtifactError("successful model attempt is missing fixture response context")
+        if response.provider != "fixture":
+            raise ArtifactError("successful fixture response must identify the fixture provider")
+        if response.finish_reason != "scripted":
+            raise ArtifactError("successful fixture response finish_reason must be scripted")
+        if response.usage.cost_usd != 0.0:
+            raise ArtifactError("successful fixture response cost must be zero")
+        usage = response.usage
+        has_tokens = usage.input_tokens is not None or usage.output_tokens is not None
+        if usage.token_source == "provider_measured" or (
+            has_tokens and usage.token_source != "synthetic"
+        ):
+            raise ArtifactError("fixture token counts must be explicitly synthetic")
+        if response.metadata != {
+            "fixture_key": request.fixture_key,
+            "behavior": "success",
+        }:
+            raise ArtifactError("successful fixture response metadata is inconsistent")
+        model_ids.add(response.model_id)
+    if len(model_ids) > 1:
+        raise ArtifactError("successful fixture responses require one consistent model ID")
+
+
 def _validate_unique_identifiers(artifact: RunArtifact) -> None:
     _require_unique((item.event_id for item in artifact.events), "event_id")
     _require_unique((item.request_id for item in artifact.model_requests), "model request_id")
@@ -931,6 +1283,51 @@ def _validate_unique_identifiers(artifact: RunArtifact) -> None:
     _require_unique((item.failure_id for item in artifact.failures), "failure_id")
 
 
+def _validate_event_vocabulary(artifact: RunArtifact) -> None:
+    unknown = {event.event_type for event in artifact.events} - _ALLOWED_EVENT_TYPES
+    if unknown:
+        raise ArtifactError(f"artifact contains unknown event type: {sorted(unknown)[0]}")
+
+
+def _validate_span_identities(artifact: RunArtifact) -> None:
+    run_spans = {event.span_id for event in artifact.events if event.event_type == "run_start"}
+    planning_spans = {
+        event.span_id
+        for event in artifact.events
+        if event.event_type == "supervisor_planning_start"
+    }
+    worker_starts = [event for event in artifact.events if event.event_type == "worker_start"]
+    worker_spans = {event.span_id for event in worker_starts}
+    finalization_spans = {
+        event.span_id
+        for event in artifact.events
+        if event.event_type == "supervisor_finalization_start"
+    }
+    model_attempt_spans = {attempt.attempt_id for attempt in artifact.model_attempts}
+    tool_attempt_spans = {result.attempt_span_id for result in artifact.tool_results}
+
+    if len(run_spans) != 1 or len(planning_spans) != 1:
+        raise ArtifactError("run_start and planning lifecycle spans must each have one identity")
+    if len(worker_spans) != len(worker_starts):
+        raise ArtifactError("worker lifecycle spans must be distinct")
+    if len(finalization_spans) > 1:
+        raise ArtifactError("finalization lifecycle requires one span identity when reached")
+
+    categories = {
+        "run": run_spans,
+        "planning": planning_spans,
+        "workers": worker_spans,
+        "finalization": finalization_spans,
+        "model attempts": model_attempt_spans,
+        "tool attempts": tool_attempt_spans,
+    }
+    names = list(categories)
+    for index, left_name in enumerate(names):
+        for right_name in names[index + 1 :]:
+            if categories[left_name] & categories[right_name]:
+                raise ArtifactError(f"span identity collision between {left_name} and {right_name}")
+
+
 def _require_unique(values: Any, label: str) -> None:
     observed = list(values)
     if len(observed) != len(set(observed)):
@@ -942,34 +1339,111 @@ def _validate_timestamps(artifact: RunArtifact) -> None:
     completed = _parse_utc_timestamp(artifact.completed_at, "run completed_at")
     if started > completed:
         raise ArtifactError("run started_at must not be after completed_at")
+
+    def within_run(value: datetime, label: str) -> None:
+        if value < started or value > completed:
+            raise ArtifactError(f"{label} must fall within the run interval")
+
     event_times = [
         _parse_utc_timestamp(event.timestamp, "event timestamp") for event in artifact.events
     ]
     if event_times != sorted(event_times):
         raise ArtifactError("event timestamps must be nondecreasing in sequence order")
-    if any(value < started or value > completed for value in event_times):
-        raise ArtifactError("event timestamps must fall within the run interval")
+    for value in event_times:
+        within_run(value, "event timestamp")
+    events_by_span: dict[str, list[AgentEvent]] = defaultdict(list)
+    for event in artifact.events:
+        events_by_span[event.span_id].append(event)
     for request in artifact.model_requests:
-        _parse_utc_timestamp(request.created_at, "model request created_at")
+        created = _parse_utc_timestamp(request.created_at, "model request created_at")
+        within_run(created, "model request created_at")
     for attempt in artifact.model_attempts:
         attempt_started = _parse_utc_timestamp(attempt.started_at, "model attempt started_at")
         attempt_completed = _parse_utc_timestamp(attempt.completed_at, "model attempt completed_at")
         if attempt_started > attempt_completed:
             raise ArtifactError("model attempt started_at must not be after completed_at")
+        within_run(attempt_started, "model attempt started_at")
+        within_run(attempt_completed, "model attempt completed_at")
+        start_events = [
+            event
+            for event in events_by_span[attempt.attempt_id]
+            if event.event_type == "model_attempt_start"
+        ]
+        terminal_events = [
+            event
+            for event in events_by_span[attempt.attempt_id]
+            if event.event_type
+            in {"model_attempt_end", "model_attempt_failure", "model_attempt_timeout"}
+        ]
+        if len(start_events) == 1:
+            start_event_time = _parse_utc_timestamp(
+                start_events[0].timestamp, "model attempt start event timestamp"
+            )
+            if start_event_time < attempt_started or start_event_time > attempt_completed:
+                raise ArtifactError("model attempt start event timestamp contradicts its record")
+        if len(terminal_events) == 1:
+            terminal_time = _parse_utc_timestamp(
+                terminal_events[0].timestamp, "model attempt terminal event timestamp"
+            )
+            if terminal_time < attempt_completed:
+                raise ArtifactError("model attempt terminal event timestamp precedes completion")
         if attempt.failure is not None:
-            _parse_utc_timestamp(attempt.failure.timestamp, "model attempt failure timestamp")
+            failure_time = _parse_utc_timestamp(
+                attempt.failure.timestamp, "model attempt failure timestamp"
+            )
+            within_run(failure_time, "model attempt failure timestamp")
+            if failure_time != attempt_completed:
+                raise ArtifactError(
+                    "model failure timestamp must equal its containing attempt completion timestamp"
+                )
     for result in artifact.tool_results:
         result_started = _parse_utc_timestamp(result.started_at, "tool attempt started_at")
         result_completed = _parse_utc_timestamp(result.completed_at, "tool attempt completed_at")
         if result_started > result_completed:
             raise ArtifactError("tool attempt started_at must not be after completed_at")
+        within_run(result_started, "tool attempt started_at")
+        within_run(result_completed, "tool attempt completed_at")
+        start_events = [
+            event
+            for event in events_by_span[result.attempt_span_id]
+            if event.event_type == "tool_attempt_start"
+        ]
+        terminal_events = [
+            event
+            for event in events_by_span[result.attempt_span_id]
+            if event.event_type
+            in {"tool_attempt_end", "tool_attempt_failure", "tool_attempt_timeout"}
+        ]
+        if len(start_events) == 1:
+            start_event_time = _parse_utc_timestamp(
+                start_events[0].timestamp, "tool attempt start event timestamp"
+            )
+            if start_event_time < result_started or start_event_time > result_completed:
+                raise ArtifactError("tool attempt start event timestamp contradicts its record")
+        if len(terminal_events) == 1:
+            terminal_time = _parse_utc_timestamp(
+                terminal_events[0].timestamp, "tool attempt terminal event timestamp"
+            )
+            if terminal_time < result_completed:
+                raise ArtifactError("tool attempt terminal event timestamp precedes completion")
         if result.failure is not None:
-            _parse_utc_timestamp(result.failure.timestamp, "tool attempt failure timestamp")
+            failure_time = _parse_utc_timestamp(
+                result.failure.timestamp, "tool attempt failure timestamp"
+            )
+            within_run(failure_time, "tool attempt failure timestamp")
+            if failure_time != result_completed:
+                raise ArtifactError(
+                    "tool failure timestamp must equal its containing attempt completion timestamp"
+                )
     for failure in artifact.failures:
-        _parse_utc_timestamp(failure.timestamp, "failure timestamp")
+        failure_time = _parse_utc_timestamp(failure.timestamp, "failure timestamp")
+        within_run(failure_time, "failure timestamp")
     for worker in artifact.final_state.worker_results:
         if worker.failure is not None:
-            _parse_utc_timestamp(worker.failure.timestamp, "worker failure timestamp")
+            failure_time = _parse_utc_timestamp(
+                worker.failure.timestamp, "worker failure timestamp"
+            )
+            within_run(failure_time, "worker failure timestamp")
 
 
 def _parse_utc_timestamp(value: str, label: str) -> datetime:
