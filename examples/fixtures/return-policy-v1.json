@@ -1,0 +1,14 @@
+{
+  "delay_seconds": 0.01,
+  "policies": [
+    {
+      "applicable_fees": "none",
+      "item_category": "household",
+      "item_condition_requirement": "unopened",
+      "market": "US",
+      "purchase_channel": "online",
+      "return_window_days": 30
+    }
+  ],
+  "schema_version": "0.1.0"
+}

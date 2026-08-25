@@ -1,0 +1,14 @@
+{
+  "delay_seconds": 0.01,
+  "orders": [
+    {
+      "delivery_date": "2026-08-10",
+      "delivery_status": "delivered",
+      "item_category": "household",
+      "market": "US",
+      "order_id": "ORD-1001",
+      "purchase_channel": "online"
+    }
+  ],
+  "schema_version": "0.1.0"
+}

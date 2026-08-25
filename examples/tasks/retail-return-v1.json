@@ -1,0 +1,6 @@
+{
+  "customer_request": "Can I return the unopened household item from order ORD-1001, and what should I do next?",
+  "order_id": "ORD-1001",
+  "schema_version": "0.1.0",
+  "task_id": "retail-return-v1"
+}

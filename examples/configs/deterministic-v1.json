@@ -1,0 +1,22 @@
+{
+  "max_worker_concurrency": 2,
+  "model_fixture": "examples/fixtures/model-script-v1.json",
+  "model_retry": {
+    "initial_backoff_seconds": 0.0,
+    "jitter_ratio": 0.0,
+    "max_attempts": 2,
+    "max_backoff_seconds": 0.0,
+    "timeout_seconds": 0.2
+  },
+  "order_fixture": "examples/fixtures/order-database-v1.json",
+  "policy_fixture": "examples/fixtures/return-policy-v1.json",
+  "provider": "fixture",
+  "schema_version": "0.1.0",
+  "tool_retry": {
+    "initial_backoff_seconds": 0.0,
+    "jitter_ratio": 0.0,
+    "max_attempts": 2,
+    "max_backoff_seconds": 0.0,
+    "timeout_seconds": 0.2
+  }
+}
