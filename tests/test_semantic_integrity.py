@@ -31,6 +31,7 @@ def _reseal(artifact: RunArtifact) -> RunArtifact:
                 digests=artifact.content_digests,
                 final_decision=artifact.final_decision,
                 events=artifact.events,
+                model_requests=artifact.model_requests,
                 model_attempts=artifact.model_attempts,
                 tool_calls=artifact.tool_calls,
                 tool_results=artifact.tool_results,

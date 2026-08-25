@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-reliability-runtime"
-version = "0.2.0"
+version = "0.3.0"
 description = "Deterministic local supervisor/worker agent runtime with inspectable reliability evidence"
 readme = "README.md"
 requires-python = ">=3.11"

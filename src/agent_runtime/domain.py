@@ -9,7 +9,15 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
-SCHEMA_VERSION = "0.2.0"
+from agent_runtime.versions import (
+    ARTIFACT_SCHEMA_VERSION,
+    RUN_CONFIG_SCHEMA_VERSION,
+    TASK_SCHEMA_VERSION,
+    ArtifactSchemaVersion,
+    RunConfigSchemaVersion,
+    TaskSchemaVersion,
+)
+
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 PurchaseChannel = Literal["online", "store"]
 DecisionCode = Literal["RETURN_ELIGIBLE", "RETURN_INELIGIBLE"]
@@ -86,7 +94,7 @@ class FailureOrigin(StrEnum):
 
 
 class TaskSpec(StrictModel):
-    schema_version: Literal["0.2.0"] = "0.2.0"
+    schema_version: TaskSchemaVersion = TASK_SCHEMA_VERSION
     task_id: str = Field(min_length=1)
     customer_request: str = Field(min_length=1)
     order_id: str = Field(min_length=1)
@@ -125,7 +133,7 @@ class RetryPolicy(StrictModel):
 
 
 class RunConfig(StrictModel):
-    schema_version: Literal["0.2.0"] = "0.2.0"
+    schema_version: RunConfigSchemaVersion = RUN_CONFIG_SCHEMA_VERSION
     provider: Literal["fixture"]
     model_fixture: str = Field(min_length=1)
     order_fixture: str = Field(min_length=1)
@@ -136,6 +144,7 @@ class RunConfig(StrictModel):
 
 
 class FailureRecord(StrictModel):
+    failure_id: str = Field(min_length=1)
     code: str = Field(min_length=1)
     origin: FailureOrigin
     phase: RuntimePhase
@@ -192,12 +201,20 @@ class UsageRecord(StrictModel):
         return self
 
 
-class ModelRequest(StrictModel):
+class ModelRequestRecord(StrictModel):
     request_id: str = Field(min_length=1)
     logical_turn_id: str = Field(min_length=1)
     source_component: str = Field(min_length=1)
+    phase: RuntimePhase
     fixture_key: str = Field(min_length=1)
+    created_at: str = Field(min_length=1)
     payload: dict[str, JsonValue]
+    payload_sha256: Sha256
+
+
+# Public compatibility name for the provider protocol. The durable record is the
+# provider input; there is no separate ephemeral request model in the fixture adapter.
+ModelRequest = ModelRequestRecord
 
 
 class ModelResponse(StrictModel):
@@ -215,6 +232,8 @@ class ModelAttempt(StrictModel):
     logical_turn_id: str = Field(min_length=1)
     request_id: str = Field(min_length=1)
     source_component: str = Field(min_length=1)
+    phase: RuntimePhase
+    parent_span_id: str = Field(min_length=1)
     attempt: int = Field(ge=1)
     outcome: AttemptOutcome
     started_at: str = Field(min_length=1)
@@ -252,12 +271,20 @@ class ToolCall(StrictModel):
     span_id: str = Field(min_length=1)
 
 
+class WorkerToolRequest(StrictModel):
+    tool_name: str = Field(min_length=1)
+    arguments: dict[str, JsonValue]
+
+
 class ToolResult(StrictModel):
     result_id: str = Field(min_length=1)
     attempt_span_id: str = Field(min_length=1)
     tool_call_id: str = Field(min_length=1)
     worker_id: str = Field(min_length=1)
     tool_name: str = Field(min_length=1)
+    source_component: str = Field(min_length=1)
+    phase: RuntimePhase
+    parent_span_id: str = Field(min_length=1)
     attempt: int = Field(ge=1)
     outcome: AttemptOutcome
     started_at: str = Field(min_length=1)
@@ -358,7 +385,7 @@ class Provenance(StrictModel):
 
 
 class RunArtifact(StrictModel):
-    schema_version: Literal["0.2.0"] = "0.2.0"
+    schema_version: ArtifactSchemaVersion = ARTIFACT_SCHEMA_VERSION
     artifact_type: Literal["agent_runtime_run"] = "agent_runtime_run"
     run_id: str = Field(min_length=1)
     status: RunStatus
@@ -369,6 +396,7 @@ class RunArtifact(StrictModel):
     final_state: AgentState
     final_decision: FinalDecision | None
     events: list[AgentEvent]
+    model_requests: list[ModelRequestRecord]
     model_attempts: list[ModelAttempt]
     tool_calls: list[ToolCall]
     tool_results: list[ToolResult]

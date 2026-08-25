@@ -132,6 +132,7 @@ async def test_required_lifecycle_events_are_enforced(tmp_path: Path) -> None:
         digests=artifact.content_digests,
         final_decision=artifact.final_decision,
         events=events,
+        model_requests=artifact.model_requests,
         model_attempts=artifact.model_attempts,
         tool_calls=artifact.tool_calls,
         tool_results=artifact.tool_results,
@@ -229,7 +230,7 @@ async def test_artifact_omits_identifying_and_external_configuration(tmp_path: P
 
 
 def test_generated_schema_matches_checked_schema() -> None:
-    checked = json.loads(Path("schemas/run-artifact-v0.2.0.json").read_text(encoding="utf-8"))
+    checked = json.loads(Path("schemas/run-artifact-v0.3.0.json").read_text(encoding="utf-8"))
     assert checked == generated_schema()
 
 
@@ -248,6 +249,12 @@ def _stable_projection(artifact: RunArtifact) -> dict[str, Any]:
     provenance.pop("git_dirty")
     payload["final_state"]["worker_results"].sort(key=lambda item: item["worker_id"])
 
+    requests = payload["model_requests"]
+    for request in requests:
+        request.pop("request_id")
+        request.pop("created_at")
+    requests.sort(key=lambda item: item["logical_turn_id"])
+
     events = payload["events"]
     for event in events:
         for key in ("event_id", "sequence", "timestamp", "span_id", "parent_span_id"):
@@ -255,11 +262,19 @@ def _stable_projection(artifact: RunArtifact) -> dict[str, Any]:
         if event["event_type"] == "run_start":
             event["payload"].pop("run_id")
         event["payload"].pop("tool_call_id", None)
+        event["payload"].pop("request_id", None)
     events.sort(key=lambda item: json.dumps(item, sort_keys=True))
 
     attempts = payload["model_attempts"]
     for attempt in attempts:
-        for key in ("attempt_id", "request_id", "started_at", "completed_at", "duration_ms"):
+        for key in (
+            "attempt_id",
+            "request_id",
+            "parent_span_id",
+            "started_at",
+            "completed_at",
+            "duration_ms",
+        ):
             attempt.pop(key)
         if attempt["response"] is not None:
             attempt["response"].pop("response_id")
@@ -277,6 +292,7 @@ def _stable_projection(artifact: RunArtifact) -> dict[str, Any]:
             "result_id",
             "attempt_span_id",
             "tool_call_id",
+            "parent_span_id",
             "started_at",
             "completed_at",
             "duration_ms",

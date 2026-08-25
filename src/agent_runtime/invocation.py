@@ -20,6 +20,7 @@ from agent_runtime.errors import (
     ClassifiedError,
     InvocationFailed,
     failure_from_error,
+    new_failure_id,
     sanitize_message,
 )
 from agent_runtime.events import isoformat_utc, utc_now
@@ -65,6 +66,7 @@ async def invoke_with_policy(
         except asyncio.CancelledError as error:
             completed_at = isoformat_utc(now())
             failure = FailureRecord(
+                failure_id=new_failure_id(),
                 code="invocation_cancelled",
                 origin=FailureOrigin.CANCELLATION,
                 phase=phase,
@@ -90,6 +92,7 @@ async def invoke_with_policy(
         except TimeoutError as error:
             completed_at = isoformat_utc(now())
             failure = FailureRecord(
+                failure_id=new_failure_id(),
                 code=timeout_code,
                 origin=timeout_origin,
                 phase=phase,
@@ -136,6 +139,7 @@ async def invoke_with_policy(
         except Exception as error:
             completed_at = isoformat_utc(now())
             failure = FailureRecord(
+                failure_id=new_failure_id(),
                 code="unexpected_invocation_error",
                 origin=FailureOrigin.UNEXPECTED_INTERNAL,
                 phase=phase,

@@ -4,8 +4,9 @@ import asyncio
 
 import pytest
 
-from agent_runtime.domain import ModelRequest
+from agent_runtime.domain import ModelRequest, RuntimePhase
 from agent_runtime.errors import ConfigurationError, ProviderError
+from agent_runtime.integrity import canonical_sha256
 from agent_runtime.providers.fixture import FixtureModelProvider
 
 
@@ -14,8 +15,11 @@ def request(key: str = "key") -> ModelRequest:
         request_id="request-1",
         logical_turn_id="turn-1",
         source_component="test",
+        phase=RuntimePhase.PLANNING,
         fixture_key=key,
+        created_at="2026-08-25T00:00:00Z",
         payload={},
+        payload_sha256=canonical_sha256({}),
     )
 
 
@@ -100,5 +104,15 @@ def test_fixture_token_counts_require_synthetic_label() -> None:
                         }
                     ]
                 },
+            }
+        )
+
+
+def test_fixture_schema_version_remains_required() -> None:
+    with pytest.raises(ConfigurationError, match="schema_version"):
+        FixtureModelProvider.from_dict(
+            {
+                "provider_id": "fixture-test",
+                "responses": {"key": [{"kind": "success", "raw_json": "{}"}]},
             }
         )

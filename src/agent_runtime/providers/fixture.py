@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent_runtime.domain import ModelRequest, ModelResponse, UsageRecord
 from agent_runtime.errors import ConfigurationError, ProviderError
+from agent_runtime.versions import ModelFixtureSchemaVersion
 
 
 class _FixtureBehavior(BaseModel):
@@ -38,7 +39,7 @@ class _FixtureBehavior(BaseModel):
 class _FixtureScript(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    schema_version: Literal["0.2.0"]
+    schema_version: ModelFixtureSchemaVersion
     provider_id: str = Field(min_length=1)
     responses: dict[str, list[_FixtureBehavior]]
 
@@ -55,12 +56,20 @@ class FixtureModelProvider:
     @classmethod
     def from_file(cls, path: Path) -> FixtureModelProvider:
         try:
-            script = _FixtureScript.model_validate_json(path.read_text(encoding="utf-8"))
+            return cls.from_bytes(path.read_bytes())
         except (OSError, ValueError) as error:
             raise ConfigurationError(
                 f"could not load model fixture: {error}", code="model_fixture_invalid"
             ) from error
-        return cls(script)
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> FixtureModelProvider:
+        try:
+            return cls(_FixtureScript.model_validate_json(data))
+        except ValueError as error:
+            raise ConfigurationError(
+                f"could not load model fixture: {error}", code="model_fixture_invalid"
+            ) from error
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> FixtureModelProvider:

@@ -14,7 +14,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Send
-from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
+from pydantic import BaseModel, JsonValue, ValidationError
 from typing_extensions import TypedDict
 
 from agent_runtime.domain import (
@@ -23,7 +23,7 @@ from agent_runtime.domain import (
     FailureRecord,
     FinalDecision,
     ModelAttempt,
-    ModelRequest,
+    ModelRequestRecord,
     ModelResponse,
     RunConfig,
     RuntimePhase,
@@ -33,6 +33,7 @@ from agent_runtime.domain import (
     ToolResult,
     WorkerAssignment,
     WorkerResult,
+    WorkerToolRequest,
     is_valid_transition,
 )
 from agent_runtime.errors import (
@@ -43,9 +44,11 @@ from agent_runtime.errors import (
     failure_from_error,
 )
 from agent_runtime.events import EventRecorder, isoformat_utc, utc_now
+from agent_runtime.integrity import canonical_sha256
 from agent_runtime.invocation import AttemptObservation, invoke_with_policy
 from agent_runtime.providers.base import ModelProvider
 from agent_runtime.semantics import (
+    CANONICAL_EVIDENCE_WORKER_IDS,
     SemanticValidationError,
     validate_stage_one_plan,
     validate_successful_decision,
@@ -58,13 +61,6 @@ class WorkerConcurrencyProbe(Protocol):
     async def entered(self, worker_id: str, active: int) -> None: ...
 
     async def exited(self, worker_id: str, active: int) -> None: ...
-
-
-class _WorkerToolRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    tool_name: str
-    arguments: dict[str, JsonValue]
 
 
 class GraphState(TypedDict, total=False):
@@ -109,6 +105,54 @@ class PhaseManager:
             self._current = target
 
 
+@dataclass(frozen=True)
+class AcceptedStateSnapshot:
+    plan: SupervisorPlan | None
+    worker_results: list[WorkerResult]
+    final_decision: FinalDecision | None
+
+
+class AcceptedStateRecorder:
+    """Capture live-validated values outside LangGraph's serializable state."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._plan: SupervisorPlan | None = None
+        self._worker_results: dict[str, WorkerResult] = {}
+        self._final_decision: FinalDecision | None = None
+
+    async def accept_plan(self, plan: SupervisorPlan) -> None:
+        async with self._lock:
+            if self._plan is not None and self._plan != plan:
+                raise OrchestrationError("accepted plan changed", code="accepted_plan_conflict")
+            self._plan = plan
+
+    async def accept_worker_result(self, result: WorkerResult) -> None:
+        async with self._lock:
+            previous = self._worker_results.get(result.worker_id)
+            if previous is not None and previous != result:
+                raise OrchestrationError(
+                    "accepted worker result changed", code="accepted_worker_result_conflict"
+                )
+            self._worker_results[result.worker_id] = result
+
+    async def accept_final_decision(self, decision: FinalDecision) -> None:
+        async with self._lock:
+            if self._final_decision is not None and self._final_decision != decision:
+                raise OrchestrationError(
+                    "accepted final decision changed", code="accepted_final_decision_conflict"
+                )
+            self._final_decision = decision
+
+    async def snapshot(self) -> AcceptedStateSnapshot:
+        async with self._lock:
+            return AcceptedStateSnapshot(
+                plan=self._plan,
+                worker_results=list(self._worker_results.values()),
+                final_decision=self._final_decision,
+            )
+
+
 class RuntimeServices:
     """Run-scoped mutable services injected outside serialization-ready graph state."""
 
@@ -128,12 +172,14 @@ class RuntimeServices:
         self.config = config
         self.run_span_id = run_span_id
         self.phase = PhaseManager(recorder, run_span_id)
+        self.accepted_state = AcceptedStateRecorder()
         self.worker_semaphore = asyncio.Semaphore(config.max_worker_concurrency)
         self.concurrency_probe = concurrency_probe
         self.active_workers = 0
         self.max_active_workers = 0
         self._activity_lock = asyncio.Lock()
         self._evidence_lock = asyncio.Lock()
+        self._model_requests: list[ModelRequestRecord] = []
         self._model_attempts: list[ModelAttempt] = []
         self._tool_calls: list[ToolCall] = []
         self._tool_results: list[ToolResult] = []
@@ -156,7 +202,18 @@ class RuntimeServices:
 
     async def add_failure(self, failure: FailureRecord) -> None:
         async with self._evidence_lock:
+            self._append_failure_locked(failure)
+
+    def _append_failure_locked(self, failure: FailureRecord) -> None:
+        previous = next(
+            (item for item in self._failures if item.failure_id == failure.failure_id), None
+        )
+        if previous is None:
             self._failures.append(failure)
+        elif previous != failure:
+            raise OrchestrationError(
+                "failure ID reused with contradictory fields", code="failure_identity_conflict"
+            )
 
     async def add_tool_call(self, call: ToolCall) -> None:
         async with self._evidence_lock:
@@ -164,9 +221,16 @@ class RuntimeServices:
 
     async def evidence(
         self,
-    ) -> tuple[list[ModelAttempt], list[ToolCall], list[ToolResult], list[FailureRecord]]:
+    ) -> tuple[
+        list[ModelRequestRecord],
+        list[ModelAttempt],
+        list[ToolCall],
+        list[ToolResult],
+        list[FailureRecord],
+    ]:
         async with self._evidence_lock:
             return (
+                list(self._model_requests),
                 list(self._model_attempts),
                 list(self._tool_calls),
                 list(self._tool_results),
@@ -175,12 +239,27 @@ class RuntimeServices:
 
     async def invoke_model(
         self,
-        request: ModelRequest,
+        request: ModelRequestRecord,
         *,
         phase: RuntimePhase,
         span_id: str,
         parent_span_id: str,
     ) -> ModelResponse:
+        if request.phase != phase:
+            raise OrchestrationError(
+                "model request phase does not match invocation", code="model_request_phase_mismatch"
+            )
+        async with self._evidence_lock:
+            if any(
+                item.request_id == request.request_id
+                or item.logical_turn_id == request.logical_turn_id
+                for item in self._model_requests
+            ):
+                raise OrchestrationError(
+                    "model request identity was recorded more than once",
+                    code="model_request_identity_conflict",
+                )
+            self._model_requests.append(request)
         attempt_ids: dict[int, str] = {}
         last_failure: FailureRecord | None = None
 
@@ -193,7 +272,11 @@ class RuntimeServices:
                 phase=phase,
                 span_id=attempt_id,
                 parent_span_id=span_id,
-                payload={"attempt": attempt, "logical_turn_id": request.logical_turn_id},
+                payload={
+                    "attempt": attempt,
+                    "logical_turn_id": request.logical_turn_id,
+                    "request_id": request.request_id,
+                },
             )
 
         async def observe(observation: AttemptObservation[ModelResponse]) -> None:
@@ -202,7 +285,7 @@ class RuntimeServices:
             failure = observation.failure
             if failure is not None:
                 failure = failure.model_copy(
-                    update={"model_attempt_id": attempt_id, "span_id": span_id}
+                    update={"model_attempt_id": attempt_id, "span_id": attempt_id}
                 )
                 last_failure = failure
             record = ModelAttempt(
@@ -210,6 +293,8 @@ class RuntimeServices:
                 logical_turn_id=request.logical_turn_id,
                 request_id=request.request_id,
                 source_component=request.source_component,
+                phase=phase,
+                parent_span_id=span_id,
                 attempt=observation.attempt,
                 outcome=observation.outcome,
                 started_at=observation.started_at,
@@ -220,6 +305,8 @@ class RuntimeServices:
             )
             async with self._evidence_lock:
                 self._model_attempts.append(record)
+                if failure is not None:
+                    self._append_failure_locked(failure)
             event_type = {
                 AttemptOutcome.SUCCEEDED: "model_attempt_end",
                 AttemptOutcome.FAILED: "model_attempt_failure",
@@ -234,7 +321,9 @@ class RuntimeServices:
                 payload={
                     "attempt": observation.attempt,
                     "logical_turn_id": request.logical_turn_id,
+                    "request_id": request.request_id,
                     "outcome": observation.outcome.value,
+                    "failure_id": failure.failure_id if failure else None,
                     "failure_code": failure.code if failure else None,
                 },
             )
@@ -273,7 +362,12 @@ class RuntimeServices:
                 phase=phase,
                 span_id=attempt_span,
                 parent_span_id=parent_span_id,
-                payload={"attempt": attempt, "tool_call_id": call.call_id},
+                payload={
+                    "attempt": attempt,
+                    "tool_call_id": call.call_id,
+                    "worker_id": call.worker_id,
+                    "tool_name": call.tool_name,
+                },
             )
 
         async def observe(observation: AttemptObservation[dict[str, JsonValue]]) -> None:
@@ -291,6 +385,9 @@ class RuntimeServices:
                 tool_call_id=call.call_id,
                 worker_id=call.worker_id,
                 tool_name=call.tool_name,
+                source_component=call.tool_name,
+                phase=phase,
+                parent_span_id=parent_span_id,
                 attempt=observation.attempt,
                 outcome=observation.outcome,
                 started_at=observation.started_at,
@@ -301,6 +398,8 @@ class RuntimeServices:
             )
             async with self._evidence_lock:
                 self._tool_results.append(result)
+                if failure is not None:
+                    self._append_failure_locked(failure)
             event_type = {
                 AttemptOutcome.SUCCEEDED: "tool_attempt_end",
                 AttemptOutcome.FAILED: "tool_attempt_failure",
@@ -315,7 +414,10 @@ class RuntimeServices:
                 payload={
                     "attempt": observation.attempt,
                     "tool_call_id": call.call_id,
+                    "worker_id": call.worker_id,
+                    "tool_name": call.tool_name,
                     "outcome": observation.outcome.value,
+                    "failure_id": failure.failure_id if failure else None,
                     "failure_code": failure.code if failure else None,
                 },
             )
@@ -368,12 +470,12 @@ async def supervisor_plan_node(state: GraphState, runtime: Runtime[RuntimeContex
         span_id=span_id,
         parent_span_id=services.run_span_id,
     )
-    request = ModelRequest(
-        request_id=f"request-{uuid4().hex}",
+    request = _model_request(
         logical_turn_id="turn-supervisor-plan",
         source_component="supervisor",
+        phase=RuntimePhase.PLANNING,
         fixture_key="supervisor_plan",
-        payload={"task": state["task"].model_dump(mode="json")},
+        payload=state["task"].model_dump(mode="json"),
     )
     try:
         response = await services.invoke_model(
@@ -407,6 +509,7 @@ async def supervisor_plan_node(state: GraphState, runtime: Runtime[RuntimeContex
         parent_span_id=services.run_span_id,
         payload={"assignment_count": len(plan.assignments)},
     )
+    await services.accepted_state.accept_plan(plan)
     await services.phase.transition(RuntimePhase.EXECUTING_WORKERS, source_component="supervisor")
     for assignment in plan.assignments:
         await services.recorder.record(
@@ -471,9 +574,11 @@ async def worker_node(state: GraphState, runtime: Runtime[RuntimeContext]) -> Gr
                 parent_span_id=services.run_span_id,
                 payload={
                     "succeeded": result.succeeded,
+                    "failure_id": result.failure.failure_id if result.failure else None,
                     "failure_code": result.failure.code if result.failure else None,
                 },
             )
+            await services.accepted_state.accept_worker_result(result)
             return {"worker_results": [result]}
         finally:
             if entered:
@@ -486,10 +591,11 @@ async def _execute_worker(
     services: RuntimeServices,
     span_id: str,
 ) -> WorkerResult:
-    request = ModelRequest(
-        request_id=f"request-{uuid4().hex}",
+    persisted_call_id: str | None = None
+    request = _model_request(
         logical_turn_id=f"turn-{assignment.worker_id}",
         source_component=assignment.worker_id,
+        phase=RuntimePhase.EXECUTING_WORKERS,
         fixture_key=f"worker:{assignment.worker_id}",
         payload={
             "task": task.model_dump(mode="json"),
@@ -503,7 +609,7 @@ async def _execute_worker(
             span_id=span_id,
             parent_span_id=services.run_span_id,
         )
-        decision = _parse_model_output(response.raw_json, _WorkerToolRequest)
+        decision = _parse_model_output(response.raw_json, WorkerToolRequest)
         call = ToolCall(
             call_id=f"tool-call-{uuid4().hex}",
             worker_id=assignment.worker_id,
@@ -511,7 +617,6 @@ async def _execute_worker(
             input=decision.arguments,
             span_id=span_id,
         )
-        await services.add_tool_call(call)
         tool, validated_input = services.tools.resolve_call(
             allowed_tools=assignment.allowed_tools,
             call=call,
@@ -525,6 +630,8 @@ async def _execute_worker(
             )
         except SemanticValidationError as error:
             raise ModelOutputError(str(error), code=error.code) from error
+        await services.add_tool_call(call)
+        persisted_call_id = call.call_id
 
         async def execute(_: int) -> dict[str, JsonValue]:
             raw_output = await tool.execute(validated_input)
@@ -555,7 +662,7 @@ async def _execute_worker(
             phase=RuntimePhase.EXECUTING_WORKERS,
             source_component=assignment.worker_id,
             span_id=span_id,
-            tool_call_id=call.call_id if "call" in locals() else None,
+            tool_call_id=persisted_call_id,
         )
         await services.add_failure(failure)
         return WorkerResult(
@@ -599,15 +706,16 @@ async def supervisor_finalize_node(
         span_id=span_id,
         parent_span_id=services.run_span_id,
     )
-    request = ModelRequest(
-        request_id=f"request-{uuid4().hex}",
+    request = _model_request(
         logical_turn_id="turn-supervisor-finalize",
         source_component="supervisor",
+        phase=RuntimePhase.FINALIZING,
         fixture_key="supervisor_finalize",
         payload={
             "task": state["task"].model_dump(mode="json"),
             "worker_results": [
-                by_id[worker_id].model_dump(mode="json") for worker_id in sorted(required)
+                by_id[worker_id].model_dump(mode="json")
+                for worker_id in CANONICAL_EVIDENCE_WORKER_IDS
             ],
         },
     )
@@ -643,6 +751,7 @@ async def supervisor_finalize_node(
         parent_span_id=services.run_span_id,
         payload={"decision_code": decision.decision_code},
     )
+    await services.accepted_state.accept_final_decision(decision)
     await services.phase.transition(RuntimePhase.SUCCEEDED, source_component="supervisor")
     await services.recorder.record(
         "run_success",
@@ -666,7 +775,7 @@ async def _fail_phase(services: RuntimeServices, failure: FailureRecord, *, span
         phase=RuntimePhase.FAILED,
         span_id=span_id,
         parent_span_id=services.run_span_id,
-        payload={"failure_code": failure.code},
+        payload={"failure_id": failure.failure_id, "failure_code": failure.code},
     )
 
 
@@ -687,6 +796,26 @@ def _parse_model_output(raw: str, model: type[ModelT]) -> ModelT:
             f"fixture provider output failed schema validation: {error}",
             code="model_output_schema_invalid",
         ) from error
+
+
+def _model_request(
+    *,
+    logical_turn_id: str,
+    source_component: str,
+    phase: RuntimePhase,
+    fixture_key: str,
+    payload: dict[str, JsonValue],
+) -> ModelRequestRecord:
+    return ModelRequestRecord(
+        request_id=f"request-{uuid4().hex}",
+        logical_turn_id=logical_turn_id,
+        source_component=source_component,
+        phase=phase,
+        fixture_key=fixture_key,
+        created_at=isoformat_utc(utc_now()),
+        payload=payload,
+        payload_sha256=canonical_sha256(payload),
+    )
 
 
 def _normalize_error(

@@ -9,10 +9,10 @@ import tempfile
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from jsonschema import Draft202012Validator
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from agent_runtime.domain import (
     Accounting,
@@ -22,6 +22,7 @@ from agent_runtime.domain import (
     FailureRecord,
     FinalDecision,
     ModelAttempt,
+    ModelRequestRecord,
     RunArtifact,
     RunConfig,
     RunStatus,
@@ -29,11 +30,15 @@ from agent_runtime.domain import (
     TaskSpec,
     ToolCall,
     ToolResult,
+    WorkerToolRequest,
     is_valid_transition,
 )
 from agent_runtime.errors import ArtifactError
-from agent_runtime.provenance import sha256_bytes
+from agent_runtime.integrity import canonical_json, canonical_sha256, sha256_bytes
 from agent_runtime.semantics import (
+    CANONICAL_EVIDENCE_WORKER_IDS,
+    ORDER_WORKER_ID,
+    POLICY_WORKER_ID,
     REQUIRED_WORKER_IDS,
     SemanticValidationError,
     validate_stage_one_plan,
@@ -45,16 +50,6 @@ _PRIVATE_PATH = re.compile(r"(?:/(?:Users|home)/[^/\s]+|[A-Za-z]:\\Users\\[^\\\s
 _SECRET_VALUE = re.compile(
     r"(?:\bsk-[A-Za-z0-9_-]{12,}\b|\bAKIA[0-9A-Z]{16}\b|\bBearer\s+[A-Za-z0-9._~+/-]{12,})"
 )
-
-
-def canonical_json(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
 
 
 def configuration_fingerprint(digests: ContentDigests, task: TaskSpec, config: RunConfig) -> str:
@@ -70,6 +65,7 @@ def configuration_fingerprint(digests: ContentDigests, task: TaskSpec, config: R
 
 
 def build_accounting(
+    model_requests: list[ModelRequestRecord],
     model_attempts: list[ModelAttempt],
     tool_calls: list[ToolCall],
     tool_results: list[ToolResult],
@@ -87,7 +83,7 @@ def build_accounting(
         if item.response is not None and item.response.usage.output_tokens is not None
     ]
     return Accounting(
-        logical_model_turns=len({item.logical_turn_id for item in model_attempts}),
+        logical_model_turns=len(model_requests),
         model_attempts=len(model_attempts),
         successful_model_attempts=model_successes,
         failed_model_attempts=len(model_attempts) - model_successes,
@@ -115,14 +111,17 @@ def semantic_fingerprint(
     digests: ContentDigests,
     final_decision: FinalDecision | None,
     events: list[AgentEvent],
+    model_requests: list[ModelRequestRecord],
     model_attempts: list[ModelAttempt],
     tool_calls: list[ToolCall],
     tool_results: list[ToolResult],
     failures: list[FailureRecord],
     accounting: Accounting,
 ) -> str:
+    request_by_id = {item.request_id: item for item in model_requests}
     model_outcomes = []
     for item in sorted(model_attempts, key=lambda value: (value.logical_turn_id, value.attempt)):
+        request = request_by_id.get(item.request_id)
         raw: Any = None
         if item.response is not None:
             try:
@@ -133,6 +132,9 @@ def semantic_fingerprint(
             {
                 "turn": item.logical_turn_id,
                 "source": item.source_component,
+                "phase": item.phase.value,
+                "fixture_key": request.fixture_key if request else None,
+                "request_payload_sha256": request.payload_sha256 if request else None,
                 "attempt": item.attempt,
                 "outcome": item.outcome.value,
                 "raw": raw,
@@ -155,6 +157,16 @@ def semantic_fingerprint(
     payload = {
         "content_digests": digests.model_dump(mode="json"),
         "final_decision": final_decision.model_dump(mode="json") if final_decision else None,
+        "model_requests": [
+            {
+                "logical_turn_id": item.logical_turn_id,
+                "source_component": item.source_component,
+                "phase": item.phase.value,
+                "fixture_key": item.fixture_key,
+                "payload_sha256": item.payload_sha256,
+            }
+            for item in sorted(model_requests, key=lambda value: value.logical_turn_id)
+        ],
         "model_outcomes": model_outcomes,
         "tool_outcomes": tool_outcomes,
         "event_types_and_sources": sorted(
@@ -185,6 +197,7 @@ def validate_artifact(artifact: RunArtifact) -> None:
     expected_hash = sha256_bytes(canonical_json(without_hash))
     if artifact.content_sha256 != expected_hash:
         raise ArtifactError("artifact content_sha256 does not match canonical content")
+    _reject_private_or_secret_data(payload)
     if artifact.task != artifact.final_state.task:
         raise ArtifactError("artifact task does not match final_state.task")
     if artifact.final_decision != artifact.final_state.final_decision:
@@ -195,7 +208,10 @@ def validate_artifact(artifact: RunArtifact) -> None:
     _validate_unique_identifiers(artifact)
     _validate_timestamps(artifact)
     expected_accounting = build_accounting(
-        artifact.model_attempts, artifact.tool_calls, artifact.tool_results
+        artifact.model_requests,
+        artifact.model_attempts,
+        artifact.tool_calls,
+        artifact.tool_results,
     )
     if artifact.accounting != expected_accounting:
         raise ArtifactError("artifact accounting does not reconcile with attempt records")
@@ -209,8 +225,13 @@ def validate_artifact(artifact: RunArtifact) -> None:
     else:
         if not artifact.failures:
             raise ArtifactError("failed or cancelled artifact requires FailureRecord evidence")
-        if artifact.final_decision is not None:
-            raise ArtifactError("failed or cancelled artifact must not contain a final decision")
+        if artifact.final_decision is not None and not any(
+            item.logical_turn_id == "turn-supervisor-finalize" for item in artifact.model_requests
+        ):
+            raise ArtifactError(
+                "failed or cancelled artifact must not contain a final decision without "
+                "accepted finalizer evidence"
+            )
         expected_phase = (
             RuntimePhase.FAILED if artifact.status == RunStatus.FAILED else RuntimePhase.CANCELLED
         )
@@ -221,16 +242,18 @@ def validate_artifact(artifact: RunArtifact) -> None:
     )
     if artifact.configuration_fingerprint != expected_config:
         raise ArtifactError("artifact configuration fingerprint is inconsistent")
-    _validate_attempt_trace(artifact)
-    _validate_worker_evidence(artifact)
-    _validate_persisted_plan(artifact)
     if artifact.status == RunStatus.SUCCEEDED:
         _validate_success_records(artifact)
+    _validate_request_and_attempt_trace(artifact)
+    _validate_worker_evidence(artifact)
+    _validate_response_action_causality(artifact)
+    _validate_failure_graph(artifact)
     _validate_required_events(artifact)
     expected_semantic = semantic_fingerprint(
         digests=artifact.content_digests,
         final_decision=artifact.final_decision,
         events=artifact.events,
+        model_requests=artifact.model_requests,
         model_attempts=artifact.model_attempts,
         tool_calls=artifact.tool_calls,
         tool_results=artifact.tool_results,
@@ -245,86 +268,577 @@ def validate_artifact(artifact: RunArtifact) -> None:
         or artifact.provenance.fixture_sha256 != artifact.content_digests.fixture_sha256
     ):
         raise ArtifactError("artifact provenance digests are inconsistent")
-    _reject_private_or_secret_data(payload)
 
 
-def _validate_attempt_trace(artifact: RunArtifact) -> None:
-    event_spans = {(item.span_id, item.event_type) for item in artifact.events}
-    for attempt in artifact.model_attempts:
-        if attempt.outcome == AttemptOutcome.SUCCEEDED:
-            if attempt.response is None or attempt.failure is not None:
-                raise ArtifactError("successful model attempt has contradictory evidence")
-        elif attempt.response is not None or attempt.failure is None:
-            raise ArtifactError("failed model attempt has contradictory evidence")
-        if (attempt.attempt_id, "model_attempt_start") not in event_spans:
-            raise ArtifactError("model attempt is missing start event evidence")
-        terminal = {
-            AttemptOutcome.SUCCEEDED: "model_attempt_end",
-            AttemptOutcome.FAILED: "model_attempt_failure",
-            AttemptOutcome.TIMED_OUT: "model_attempt_timeout",
-        }[attempt.outcome]
-        if (attempt.attempt_id, terminal) not in event_spans:
-            raise ArtifactError("model attempt is missing terminal event evidence")
-    call_by_id = {item.call_id: item for item in artifact.tool_calls}
-    for result in artifact.tool_results:
-        call = call_by_id.get(result.tool_call_id)
-        if call is None:
-            raise ArtifactError("tool result references an unknown logical tool call")
-        if result.worker_id != call.worker_id or result.tool_name != call.tool_name:
-            raise ArtifactError("tool result identity does not match its logical tool call")
-        if result.outcome == AttemptOutcome.SUCCEEDED:
-            if result.output is None or result.failure is not None:
-                raise ArtifactError("successful tool attempt has contradictory evidence")
-        elif result.output is not None or result.failure is None:
-            raise ArtifactError("failed tool attempt has contradictory evidence")
-        if (result.attempt_span_id, "tool_attempt_start") not in event_spans:
-            raise ArtifactError("tool attempt is missing start event evidence")
-        terminal = {
-            AttemptOutcome.SUCCEEDED: "tool_attempt_end",
-            AttemptOutcome.FAILED: "tool_attempt_failure",
-            AttemptOutcome.TIMED_OUT: "tool_attempt_timeout",
-        }[result.outcome]
-        if (result.attempt_span_id, terminal) not in event_spans:
-            raise ArtifactError("tool attempt is missing terminal event evidence")
-
+def _validate_request_and_attempt_trace(artifact: RunArtifact) -> None:
+    requests_by_id = {item.request_id: item for item in artifact.model_requests}
     model_groups: dict[str, list[ModelAttempt]] = defaultdict(list)
-    request_context: dict[str, tuple[str, str]] = {}
-    turn_requests: dict[str, str] = {}
+    model_event_types = {
+        "model_attempt_start",
+        "model_attempt_end",
+        "model_attempt_failure",
+        "model_attempt_timeout",
+    }
+    tool_event_types = {
+        "tool_attempt_start",
+        "tool_attempt_end",
+        "tool_attempt_failure",
+        "tool_attempt_timeout",
+    }
+
+    for request in artifact.model_requests:
+        if request.payload_sha256 != canonical_sha256(request.payload):
+            raise ArtifactError("model request payload_sha256 does not match canonical payload")
+
     for attempt in artifact.model_attempts:
-        context = (attempt.logical_turn_id, attempt.source_component)
-        previous_context = request_context.setdefault(attempt.request_id, context)
-        if previous_context != context:
-            raise ArtifactError("model request ID is reused across logical request contexts")
-        previous_request = turn_requests.setdefault(attempt.logical_turn_id, attempt.request_id)
-        if previous_request != attempt.request_id:
-            raise ArtifactError("logical model turn references multiple request IDs")
         model_groups[attempt.request_id].append(attempt)
     for attempts in model_groups.values():
         numbers = sorted(item.attempt for item in attempts)
         if numbers != list(range(1, len(numbers) + 1)):
             raise ArtifactError("model attempt numbers must be contiguous from 1")
-        ordered = sorted(attempts, key=lambda item: item.attempt)
-        successes = [item for item in ordered if item.outcome == AttemptOutcome.SUCCEEDED]
-        if len(successes) > 1 or (successes and ordered[-1] != successes[0]):
-            raise ArtifactError("successful model attempt must be unique and terminal")
 
+    for attempt in artifact.model_attempts:
+        request_record = requests_by_id.get(attempt.request_id)
+        if request_record is None:
+            raise ArtifactError("model attempt references an absent durable request")
+        if (
+            attempt.logical_turn_id != request_record.logical_turn_id
+            or attempt.source_component != request_record.source_component
+            or attempt.phase != request_record.phase
+        ):
+            raise ArtifactError("model attempt context does not match its durable request")
+        if attempt.outcome == AttemptOutcome.SUCCEEDED:
+            if attempt.response is None or attempt.failure is not None:
+                raise ArtifactError("successful model attempt has contradictory evidence")
+        elif attempt.response is not None or attempt.failure is None:
+            raise ArtifactError("failed model attempt has contradictory evidence")
+        events = [
+            item
+            for item in artifact.events
+            if item.span_id == attempt.attempt_id and item.event_type in model_event_types
+        ]
+        starts = [item for item in events if item.event_type == "model_attempt_start"]
+        terminals = [item for item in events if item.event_type != "model_attempt_start"]
+        if len(starts) != 1 or len(terminals) != 1:
+            raise ArtifactError("model attempt requires exactly one start and one terminal event")
+        terminal_type = {
+            AttemptOutcome.SUCCEEDED: "model_attempt_end",
+            AttemptOutcome.FAILED: "model_attempt_failure",
+            AttemptOutcome.TIMED_OUT: "model_attempt_timeout",
+        }[attempt.outcome]
+        if terminals[0].event_type != terminal_type:
+            raise ArtifactError("model attempt terminal event contradicts its outcome")
+        expected_start = {
+            "attempt": attempt.attempt,
+            "logical_turn_id": attempt.logical_turn_id,
+            "request_id": attempt.request_id,
+        }
+        expected_terminal = {
+            **expected_start,
+            "outcome": attempt.outcome.value,
+            "failure_id": attempt.failure.failure_id if attempt.failure else None,
+            "failure_code": attempt.failure.code if attempt.failure else None,
+        }
+        _validate_attempt_event(starts[0], attempt, expected_start)
+        _validate_attempt_event(terminals[0], attempt, expected_terminal)
+        if starts[0].sequence >= terminals[0].sequence:
+            raise ArtifactError("model attempt terminal event must follow its start event")
+
+    attempt_ids = {item.attempt_id for item in artifact.model_attempts}
+    if any(
+        event.event_type in model_event_types and event.span_id not in attempt_ids
+        for event in artifact.events
+    ):
+        raise ArtifactError("artifact contains an orphan model-attempt event")
+
+    for request in artifact.model_requests:
+        attempts = sorted(model_groups.get(request.request_id, []), key=lambda item: item.attempt)
+        created = _parse_utc_timestamp(request.created_at, "model request created_at")
+        if attempts and created > _parse_utc_timestamp(
+            attempts[0].started_at, "model attempt started_at"
+        ):
+            raise ArtifactError("model request must be created before its first provider attempt")
+        numbers = [item.attempt for item in attempts]
+        if numbers != list(range(1, len(numbers) + 1)):
+            raise ArtifactError("model attempt numbers must be contiguous from 1")
+        model_successes = [item for item in attempts if item.outcome == AttemptOutcome.SUCCEEDED]
+        if len(model_successes) > 1 or (model_successes and attempts[-1] != model_successes[0]):
+            raise ArtifactError("successful model attempt must be unique and terminal")
+        previous_terminal_sequence: int | None = None
+        previous_completed_at: datetime | None = None
+        for attempt in attempts:
+            start_event = next(
+                item
+                for item in artifact.events
+                if item.span_id == attempt.attempt_id and item.event_type == "model_attempt_start"
+            )
+            terminal_event = next(
+                item
+                for item in artifact.events
+                if item.span_id == attempt.attempt_id
+                and item.event_type != "model_attempt_start"
+                and item.event_type in model_event_types
+            )
+            started = _parse_utc_timestamp(attempt.started_at, "model attempt started_at")
+            if (
+                previous_terminal_sequence is not None
+                and previous_terminal_sequence >= start_event.sequence
+            ) or (previous_completed_at is not None and previous_completed_at > started):
+                raise ArtifactError(
+                    "model retry attempt must start after the previous attempt terminates"
+                )
+            previous_terminal_sequence = terminal_event.sequence
+            previous_completed_at = _parse_utc_timestamp(
+                attempt.completed_at, "model attempt completed_at"
+            )
+
+    call_by_id = {item.call_id: item for item in artifact.tool_calls}
     tool_groups: dict[str, list[ToolResult]] = defaultdict(list)
     for result in artifact.tool_results:
         tool_groups[result.tool_call_id].append(result)
-    for results in tool_groups.values():
-        numbers = sorted(item.attempt for item in results)
+    for tool_attempts in tool_groups.values():
+        numbers = sorted(item.attempt for item in tool_attempts)
         if numbers != list(range(1, len(numbers) + 1)):
             raise ArtifactError("tool attempt numbers must be contiguous from 1")
+    for result in artifact.tool_results:
+        call = call_by_id.get(result.tool_call_id)
+        if call is None:
+            raise ArtifactError("tool result references an unknown logical tool call")
+        if (
+            result.worker_id != call.worker_id
+            or result.tool_name != call.tool_name
+            or result.source_component != call.tool_name
+            or result.phase != RuntimePhase.EXECUTING_WORKERS
+            or result.parent_span_id != call.span_id
+        ):
+            raise ArtifactError("tool result context does not match its logical tool call")
+        if result.outcome == AttemptOutcome.SUCCEEDED:
+            if result.output is None or result.failure is not None:
+                raise ArtifactError("successful tool attempt has contradictory evidence")
+        elif result.output is not None or result.failure is None:
+            raise ArtifactError("failed tool attempt has contradictory evidence")
+        events = [
+            item
+            for item in artifact.events
+            if item.span_id == result.attempt_span_id and item.event_type in tool_event_types
+        ]
+        starts = [item for item in events if item.event_type == "tool_attempt_start"]
+        terminals = [item for item in events if item.event_type != "tool_attempt_start"]
+        if len(starts) != 1 or len(terminals) != 1:
+            raise ArtifactError("tool attempt requires exactly one start and one terminal event")
+        terminal_type = {
+            AttemptOutcome.SUCCEEDED: "tool_attempt_end",
+            AttemptOutcome.FAILED: "tool_attempt_failure",
+            AttemptOutcome.TIMED_OUT: "tool_attempt_timeout",
+        }[result.outcome]
+        if terminals[0].event_type != terminal_type:
+            raise ArtifactError("tool attempt terminal event contradicts its outcome")
+        expected_start = {
+            "attempt": result.attempt,
+            "tool_call_id": result.tool_call_id,
+            "worker_id": result.worker_id,
+            "tool_name": result.tool_name,
+        }
+        expected_terminal = {
+            **expected_start,
+            "outcome": result.outcome.value,
+            "failure_id": result.failure.failure_id if result.failure else None,
+            "failure_code": result.failure.code if result.failure else None,
+        }
+        _validate_tool_attempt_event(starts[0], result, expected_start)
+        _validate_tool_attempt_event(terminals[0], result, expected_terminal)
+        if starts[0].sequence >= terminals[0].sequence:
+            raise ArtifactError("tool attempt terminal event must follow its start event")
+
+    result_spans = {item.attempt_span_id for item in artifact.tool_results}
+    if any(
+        event.event_type in tool_event_types and event.span_id not in result_spans
+        for event in artifact.events
+    ):
+        raise ArtifactError("artifact contains an orphan tool-attempt event")
+    for tool_attempts in tool_groups.values():
+        ordered = sorted(tool_attempts, key=lambda item: item.attempt)
+        numbers = [item.attempt for item in ordered]
+        if numbers != list(range(1, len(numbers) + 1)):
+            raise ArtifactError("tool attempt numbers must be contiguous from 1")
+        tool_successes = [item for item in ordered if item.outcome == AttemptOutcome.SUCCEEDED]
+        if len(tool_successes) > 1 or (tool_successes and ordered[-1] != tool_successes[0]):
+            raise ArtifactError("successful tool attempt must be unique and terminal")
+        previous_terminal_sequence = None
+        previous_completed_at = None
+        for result in ordered:
+            start_event = next(
+                item
+                for item in artifact.events
+                if item.span_id == result.attempt_span_id
+                and item.event_type == "tool_attempt_start"
+            )
+            terminal_event = next(
+                item
+                for item in artifact.events
+                if item.span_id == result.attempt_span_id
+                and item.event_type != "tool_attempt_start"
+                and item.event_type in tool_event_types
+            )
+            started = _parse_utc_timestamp(result.started_at, "tool result started_at")
+            if (
+                previous_terminal_sequence is not None
+                and previous_terminal_sequence >= start_event.sequence
+            ) or (previous_completed_at is not None and previous_completed_at > started):
+                raise ArtifactError(
+                    "tool retry attempt must start after the previous attempt terminates"
+                )
+            previous_terminal_sequence = terminal_event.sequence
+            previous_completed_at = _parse_utc_timestamp(
+                result.completed_at, "tool result completed_at"
+            )
 
 
-def _validate_persisted_plan(artifact: RunArtifact) -> None:
+def _validate_attempt_event(
+    event: AgentEvent, attempt: ModelAttempt, expected_payload: dict[str, Any]
+) -> None:
+    if (
+        event.source_component != attempt.source_component
+        or event.phase != attempt.phase
+        or event.parent_span_id != attempt.parent_span_id
+        or event.payload != expected_payload
+    ):
+        raise ArtifactError("model-attempt event context or payload contradicts its record")
+
+
+def _validate_tool_attempt_event(
+    event: AgentEvent, result: ToolResult, expected_payload: dict[str, Any]
+) -> None:
+    if (
+        event.source_component != result.source_component
+        or event.phase != result.phase
+        or event.parent_span_id != result.parent_span_id
+        or event.payload != expected_payload
+    ):
+        raise ArtifactError("tool-attempt event context or payload contradicts its record")
+
+
+def _validate_response_action_causality(artifact: RunArtifact) -> None:
+    allowed_contexts = {
+        "turn-supervisor-plan": ("supervisor", RuntimePhase.PLANNING, "supervisor_plan"),
+        "turn-order-worker": (
+            ORDER_WORKER_ID,
+            RuntimePhase.EXECUTING_WORKERS,
+            f"worker:{ORDER_WORKER_ID}",
+        ),
+        "turn-policy-worker": (
+            POLICY_WORKER_ID,
+            RuntimePhase.EXECUTING_WORKERS,
+            f"worker:{POLICY_WORKER_ID}",
+        ),
+        "turn-supervisor-finalize": (
+            "supervisor",
+            RuntimePhase.FINALIZING,
+            "supervisor_finalize",
+        ),
+    }
+    requests_by_turn = {item.logical_turn_id: item for item in artifact.model_requests}
+    attempts_by_request: dict[str, list[ModelAttempt]] = defaultdict(list)
+    for attempt in artifact.model_attempts:
+        attempts_by_request[attempt.request_id].append(attempt)
+
+    for request in artifact.model_requests:
+        expected = allowed_contexts.get(request.logical_turn_id)
+        if expected is None:
+            raise ArtifactError("artifact contains an unrelated Stage 1 logical model turn")
+        if (request.source_component, request.phase, request.fixture_key) != expected:
+            raise ArtifactError("durable model request has the wrong Stage 1 context")
+
     plan = artifact.final_state.plan
-    if plan is None:
-        return
+    planner_request = requests_by_turn.get("turn-supervisor-plan")
+    if planner_request is not None and planner_request.payload != artifact.task.model_dump(
+        mode="json"
+    ):
+        raise ArtifactError("planner request payload does not equal the persisted task")
+    if plan is not None:
+        if planner_request is None:
+            raise ArtifactError("persisted plan requires a durable planner request")
+        try:
+            validate_stage_one_plan(plan)
+        except SemanticValidationError as error:
+            raise ArtifactError(str(error), code=error.code) from error
+        parsed_plan = _parse_terminal_response(
+            planner_request, attempts_by_request, type(plan), "persisted plan"
+        )
+        if parsed_plan != plan:
+            raise ArtifactError("planner terminal response does not equal the persisted plan")
+
+    assignments = {item.worker_id: item for item in plan.assignments} if plan is not None else {}
+    for worker_id in CANONICAL_EVIDENCE_WORKER_IDS:
+        worker_request = requests_by_turn.get(f"turn-{worker_id}")
+        if worker_request is None:
+            continue
+        assignment = assignments.get(worker_id)
+        if assignment is None:
+            raise ArtifactError("worker request exists without an accepted plan assignment")
+        expected_payload = {
+            "task": artifact.task.model_dump(mode="json"),
+            "assignment": assignment.model_dump(mode="json"),
+        }
+        if worker_request.payload != expected_payload:
+            raise ArtifactError("worker request payload does not match task and assignment")
+
+    for worker in artifact.final_state.worker_results:
+        worker_request = requests_by_turn.get(f"turn-{worker.worker_id}")
+        if worker_request is None:
+            raise ArtifactError("persisted worker result requires its durable model request")
+        worker_attempts = sorted(
+            attempts_by_request.get(worker_request.request_id, []),
+            key=lambda item: item.attempt,
+        )
+        if not worker_attempts:
+            raise ArtifactError("persisted worker result requires terminal provider evidence")
+
+    calls_by_worker: dict[str, list[ToolCall]] = defaultdict(list)
+    for call in artifact.tool_calls:
+        calls_by_worker[call.worker_id].append(call)
+    if any(len(items) != 1 for items in calls_by_worker.values()):
+        raise ArtifactError("a Stage 1 worker may persist at most one logical tool call")
+    if set(calls_by_worker) - REQUIRED_WORKER_IDS:
+        raise ArtifactError("tool call references an unknown Stage 1 worker")
+    for worker_id, calls in calls_by_worker.items():
+        worker_request = requests_by_turn.get(f"turn-{worker_id}")
+        if worker_request is None:
+            raise ArtifactError("persisted tool call requires its durable worker request")
+        parsed_call = _parse_terminal_response(
+            worker_request, attempts_by_request, WorkerToolRequest, "persisted tool call"
+        )
+        call = calls[0]
+        if parsed_call.tool_name != call.tool_name or parsed_call.arguments != call.input:
+            raise ArtifactError("worker terminal response does not equal the persisted tool call")
+        try:
+            validate_worker_tool_request(artifact.task, worker_id, call.tool_name, call.input)
+        except SemanticValidationError as error:
+            raise ArtifactError(str(error), code=error.code) from error
+
+    finalizer_request = requests_by_turn.get("turn-supervisor-finalize")
+    workers_by_id = {item.worker_id: item for item in artifact.final_state.worker_results}
+    if finalizer_request is not None:
+        if (
+            len(workers_by_id) != 2
+            or set(workers_by_id) != REQUIRED_WORKER_IDS
+            or any(not item.succeeded for item in workers_by_id.values())
+        ):
+            raise ArtifactError("finalizer request exists without both successful worker results")
+        finalizer_payload = {
+            "task": artifact.task.model_dump(mode="json"),
+            "worker_results": [
+                workers_by_id[worker_id].model_dump(mode="json")
+                for worker_id in CANONICAL_EVIDENCE_WORKER_IDS
+            ],
+        }
+        if finalizer_request.payload != finalizer_payload:
+            raise ArtifactError(
+                "finalizer request payload does not match canonical worker evidence"
+            )
+
+    if artifact.final_decision is not None:
+        if finalizer_request is None:
+            raise ArtifactError("persisted final decision requires a durable finalizer request")
+        parsed_decision = _parse_terminal_response(
+            finalizer_request, attempts_by_request, FinalDecision, "persisted final decision"
+        )
+        if parsed_decision != artifact.final_decision:
+            raise ArtifactError("finalizer terminal response does not equal the persisted decision")
+        try:
+            validate_successful_decision(
+                artifact.task, artifact.final_state.worker_results, artifact.final_decision
+            )
+        except SemanticValidationError as error:
+            raise ArtifactError(str(error), code=error.code) from error
+
+    if artifact.status == RunStatus.SUCCEEDED:
+        if set(requests_by_turn) != set(allowed_contexts) or len(artifact.model_requests) != 4:
+            raise ArtifactError("success requires exactly the four Stage 1 logical model turns")
+        for request in artifact.model_requests:
+            _terminal_success(request, attempts_by_request)
+
+
+ModelValue = TypeVar("ModelValue", bound=BaseModel)
+
+
+def _parse_terminal_response(
+    request: ModelRequestRecord,
+    attempts_by_request: dict[str, list[ModelAttempt]],
+    model: type[ModelValue],
+    label: str,
+) -> ModelValue:
+    terminal = _terminal_success(request, attempts_by_request)
+    if terminal.response is None:  # guarded by the attempt model and trace validation
+        raise ArtifactError(f"{label} requires a terminal successful provider response")
     try:
-        validate_stage_one_plan(plan)
-    except SemanticValidationError as error:
-        raise ArtifactError(str(error), code=error.code) from error
+        value = json.loads(terminal.response.raw_json)
+        return model.model_validate(value)
+    except (json.JSONDecodeError, ValidationError, ValueError) as error:
+        raise ArtifactError(
+            f"terminal provider response cannot parse as {model.__name__}"
+        ) from error
+
+
+def _terminal_success(
+    request: ModelRequestRecord,
+    attempts_by_request: dict[str, list[ModelAttempt]],
+) -> ModelAttempt:
+    attempts = sorted(
+        attempts_by_request.get(request.request_id, []), key=lambda item: item.attempt
+    )
+    if not attempts or attempts[-1].outcome != AttemptOutcome.SUCCEEDED:
+        raise ArtifactError("downstream state requires a terminal successful provider response")
+    return attempts[-1]
+
+
+def _validate_failure_graph(artifact: RunArtifact) -> None:
+    failures_by_id = {item.failure_id: item for item in artifact.failures}
+    attempts_by_id = {item.attempt_id: item for item in artifact.model_attempts}
+    calls_by_id = {item.call_id: item for item in artifact.tool_calls}
+    results_by_span = {item.attempt_span_id: item for item in artifact.tool_results}
+    results_by_call: dict[str, list[ToolResult]] = defaultdict(list)
+    attempts_by_request: dict[str, list[ModelAttempt]] = defaultdict(list)
+    requests_by_turn = {item.logical_turn_id: item for item in artifact.model_requests}
+    for result in artifact.tool_results:
+        results_by_call[result.tool_call_id].append(result)
+    for attempt in artifact.model_attempts:
+        attempts_by_request[attempt.request_id].append(attempt)
+    referenced_failure_ids: set[str] = set()
+
+    for attempt in artifact.model_attempts:
+        failure = attempt.failure
+        if failure is None:
+            continue
+        referenced_failure_ids.add(failure.failure_id)
+        _require_top_level_failure(failure, failures_by_id)
+        if (
+            failure.attempt != attempt.attempt
+            or failure.model_attempt_id != attempt.attempt_id
+            or failure.tool_call_id is not None
+            or failure.source_component != attempt.source_component
+            or failure.phase != attempt.phase
+            or failure.span_id != attempt.attempt_id
+        ):
+            raise ArtifactError("model-attempt failure contradicts its containing record")
+
+    for result in artifact.tool_results:
+        failure = result.failure
+        if failure is None:
+            continue
+        referenced_failure_ids.add(failure.failure_id)
+        _require_top_level_failure(failure, failures_by_id)
+        if (
+            failure.attempt != result.attempt
+            or failure.model_attempt_id is not None
+            or failure.tool_call_id != result.tool_call_id
+            or failure.source_component != result.source_component
+            or failure.phase != result.phase
+            or failure.span_id != result.attempt_span_id
+        ):
+            raise ArtifactError("tool-attempt failure contradicts its containing record")
+
+    for worker in artifact.final_state.worker_results:
+        failure = worker.failure
+        if failure is None:
+            continue
+        referenced_failure_ids.add(failure.failure_id)
+        _require_top_level_failure(failure, failures_by_id)
+        if failure.phase != RuntimePhase.EXECUTING_WORKERS:
+            raise ArtifactError("worker failure has the wrong phase")
+        request = requests_by_turn.get(f"turn-{worker.worker_id}")
+        if request is None:
+            raise ArtifactError("failed worker is missing its durable model request")
+        model_attempts = sorted(
+            attempts_by_request.get(request.request_id, []), key=lambda item: item.attempt
+        )
+        if not model_attempts:
+            raise ArtifactError("failed worker is missing terminal model-attempt evidence")
+        terminal_model = model_attempts[-1]
+        if failure.model_attempt_id is not None:
+            linked_attempt = attempts_by_id.get(failure.model_attempt_id)
+            if (
+                linked_attempt is None
+                or linked_attempt.logical_turn_id != f"turn-{worker.worker_id}"
+                or linked_attempt != terminal_model
+                or linked_attempt.failure != failure
+            ):
+                raise ArtifactError("worker failure references the wrong model attempt")
+        elif failure.tool_call_id is not None:
+            call = calls_by_id.get(failure.tool_call_id)
+            if call is None or call.worker_id != worker.worker_id:
+                raise ArtifactError("worker failure references the wrong tool call")
+            tool_attempts = sorted(
+                results_by_call.get(call.call_id, []), key=lambda item: item.attempt
+            )
+            if (
+                terminal_model.outcome != AttemptOutcome.SUCCEEDED
+                or not tool_attempts
+                or tool_attempts[-1].failure != failure
+            ):
+                raise ArtifactError("worker failure does not match terminal tool evidence")
+        else:
+            worker_starts = [
+                item
+                for item in artifact.events
+                if item.event_type == "worker_start" and item.source_component == worker.worker_id
+            ]
+            if (
+                terminal_model.outcome != AttemptOutcome.SUCCEEDED
+                or len(worker_starts) != 1
+                or failure.source_component != worker.worker_id
+                or failure.span_id != worker_starts[0].span_id
+                or failure.attempt is not None
+            ):
+                raise ArtifactError("worker failure context is not causally linked")
+
+    for failure in artifact.failures:
+        if failure.model_attempt_id is not None and failure.model_attempt_id not in attempts_by_id:
+            raise ArtifactError("failure references an absent model attempt")
+        if failure.tool_call_id is not None and failure.tool_call_id not in calls_by_id:
+            raise ArtifactError("failure references an absent tool call")
+        if failure.span_id is not None and failure.model_attempt_id is not None:
+            if failure.span_id != failure.model_attempt_id:
+                raise ArtifactError("failure span does not match its model attempt")
+        if failure.span_id is not None and failure.span_id in results_by_span:
+            result = results_by_span[failure.span_id]
+            if failure.tool_call_id != result.tool_call_id:
+                raise ArtifactError("failure span does not match its tool attempt")
+
+    failure_event_types = {
+        "model_attempt_failure",
+        "model_attempt_timeout",
+        "tool_attempt_failure",
+        "tool_attempt_timeout",
+        "worker_failure",
+        "run_failure",
+        "run_cancellation",
+    }
+    for event in artifact.events:
+        failure_id = event.payload.get("failure_id")
+        if failure_id is None:
+            continue
+        if event.event_type not in failure_event_types:
+            raise ArtifactError("non-failure event cannot reference a failure")
+        if not isinstance(failure_id, str):
+            raise ArtifactError("failure event contains an invalid failure ID")
+        failure = failures_by_id.get(failure_id)
+        if failure is None or event.payload.get("failure_code") != failure.code:
+            raise ArtifactError("failure event references an absent or contradictory failure")
+        referenced_failure_ids.add(failure_id)
+
+    if set(failures_by_id) != referenced_failure_ids:
+        raise ArtifactError("top-level failure collection contains unreferenced evidence")
+
+
+def _require_top_level_failure(
+    failure: FailureRecord, failures_by_id: dict[str, FailureRecord]
+) -> None:
+    top_level = failures_by_id.get(failure.failure_id)
+    if top_level is None:
+        raise ArtifactError("nested failure is absent from the top-level failure collection")
+    if top_level != failure:
+        raise ArtifactError("nested failure fields contradict the top-level failure record")
 
 
 def _validate_success_records(artifact: RunArtifact) -> None:
@@ -365,9 +879,15 @@ def _validate_worker_evidence(artifact: RunArtifact) -> None:
         results_by_call[result.tool_call_id].append(result)
 
     for worker in workers:
-        if not worker.succeeded:
-            continue
         calls = calls_by_worker.get(worker.worker_id, [])
+        if not worker.succeeded:
+            if any(
+                result.outcome == AttemptOutcome.SUCCEEDED
+                for call in calls
+                for result in results_by_call.get(call.call_id, [])
+            ):
+                raise ArtifactError("failed worker contradicts terminal successful tool evidence")
+            continue
         if len(calls) != 1:
             raise ArtifactError(
                 "successful worker requires exactly one corresponding logical tool call"
@@ -389,6 +909,10 @@ def _validate_worker_evidence(artifact: RunArtifact) -> None:
 
 def _validate_unique_identifiers(artifact: RunArtifact) -> None:
     _require_unique((item.event_id for item in artifact.events), "event_id")
+    _require_unique((item.request_id for item in artifact.model_requests), "model request_id")
+    _require_unique(
+        (item.logical_turn_id for item in artifact.model_requests), "logical model turn_id"
+    )
     _require_unique((item.attempt_id for item in artifact.model_attempts), "model attempt_id")
     _require_unique((item.call_id for item in artifact.tool_calls), "tool call_id")
     _require_unique((item.result_id for item in artifact.tool_results), "tool result_id")
@@ -404,6 +928,7 @@ def _validate_unique_identifiers(artifact: RunArtifact) -> None:
         ),
         "successful model response_id",
     )
+    _require_unique((item.failure_id for item in artifact.failures), "failure_id")
 
 
 def _require_unique(values: Any, label: str) -> None:
@@ -417,8 +942,15 @@ def _validate_timestamps(artifact: RunArtifact) -> None:
     completed = _parse_utc_timestamp(artifact.completed_at, "run completed_at")
     if started > completed:
         raise ArtifactError("run started_at must not be after completed_at")
-    for event in artifact.events:
-        _parse_utc_timestamp(event.timestamp, "event timestamp")
+    event_times = [
+        _parse_utc_timestamp(event.timestamp, "event timestamp") for event in artifact.events
+    ]
+    if event_times != sorted(event_times):
+        raise ArtifactError("event timestamps must be nondecreasing in sequence order")
+    if any(value < started or value > completed for value in event_times):
+        raise ArtifactError("event timestamps must fall within the run interval")
+    for request in artifact.model_requests:
+        _parse_utc_timestamp(request.created_at, "model request created_at")
     for attempt in artifact.model_attempts:
         attempt_started = _parse_utc_timestamp(attempt.started_at, "model attempt started_at")
         attempt_completed = _parse_utc_timestamp(attempt.completed_at, "model attempt completed_at")
@@ -466,13 +998,39 @@ def _validate_required_events(artifact: RunArtifact) -> None:
             and (phase is None or event.phase == phase)
         ]
 
-    starts = matching("run_start", "runtime", RuntimePhase.INITIALIZED)
-    if len(starts) != 1 or starts[0].sequence != 1:
+    events_by_type: dict[str, list[AgentEvent]] = defaultdict(list)
+    for event in artifact.events:
+        events_by_type[event.event_type].append(event)
+
+    run_starts = events_by_type["run_start"]
+    if (
+        len(run_starts) != 1
+        or run_starts[0].sequence != 1
+        or run_starts[0].source_component != "runtime"
+        or run_starts[0].phase != RuntimePhase.INITIALIZED
+    ):
         raise ArtifactError("artifact requires exactly one initial runtime run_start event")
-    if not matching("supervisor_planning_start", "supervisor", RuntimePhase.PLANNING):
-        raise ArtifactError("artifact is missing supervisor planning start evidence")
-    if not matching("artifact_persistence_start", "artifact", artifact.final_state.phase):
-        raise ArtifactError("artifact is missing persistence-start evidence")
+    run_start = run_starts[0]
+    if (
+        run_start.span_id == ""
+        or run_start.parent_span_id is not None
+        or run_start.payload != {"run_id": artifact.run_id, "task_id": artifact.task.task_id}
+    ):
+        raise ArtifactError("run_start span context is invalid")
+    persistence = events_by_type["artifact_persistence_start"]
+    if (
+        len(persistence) != 1
+        or persistence[0].sequence != len(artifact.events)
+        or persistence[0].source_component != "artifact"
+        or persistence[0].phase != artifact.final_state.phase
+    ):
+        raise ArtifactError("artifact requires exactly one final persistence-start event")
+    if (
+        persistence[0].span_id != run_start.span_id
+        or persistence[0].parent_span_id is not None
+        or persistence[0].payload != {}
+    ):
+        raise ArtifactError("persistence-start span context is invalid")
 
     transitions = matching("state_transition")
     current = RuntimePhase.INITIALIZED
@@ -487,39 +1045,409 @@ def _validate_required_events(artifact: RunArtifact) -> None:
             raise ArtifactError("artifact state-transition target is invalid") from error
         if not is_valid_transition(current, next_phase):
             raise ArtifactError("artifact contains an invalid state-transition event")
+        expected_source = {
+            RuntimePhase.PLANNING: "runtime",
+            RuntimePhase.EXECUTING_WORKERS: "supervisor",
+            RuntimePhase.FINALIZING: "supervisor",
+            RuntimePhase.SUCCEEDED: "supervisor",
+            RuntimePhase.CANCELLED: "runtime",
+        }.get(next_phase)
+        if expected_source is not None and event.source_component != expected_source:
+            raise ArtifactError("state-transition source contradicts the Stage 1 graph")
+        if (
+            event.span_id != run_start.span_id
+            or event.parent_span_id is not None
+            or event.payload != {"from": current.value, "to": next_phase.value}
+        ):
+            raise ArtifactError("state-transition event context is invalid")
         current = next_phase
     if current != artifact.final_state.phase:
         raise ArtifactError("artifact transition chain does not reach the final state")
 
-    plan = artifact.final_state.plan
-    if plan is not None:
-        dispatch_ids = {
-            cast(str, event.payload.get("worker_id"))
-            for event in matching("worker_dispatch", "supervisor", RuntimePhase.EXECUTING_WORKERS)
-        }
-        if dispatch_ids != {item.worker_id for item in plan.assignments}:
-            raise ArtifactError("artifact worker-dispatch evidence does not match the plan")
-    for result in artifact.final_state.worker_results:
-        if not matching("worker_start", result.worker_id, RuntimePhase.EXECUTING_WORKERS):
-            raise ArtifactError("artifact is missing worker-start evidence")
-        terminal = "worker_end" if result.succeeded else "worker_failure"
-        if not matching(terminal, result.worker_id, RuntimePhase.EXECUTING_WORKERS):
-            raise ArtifactError("artifact is missing worker terminal evidence")
+    planning_starts = events_by_type["supervisor_planning_start"]
+    if (
+        len(planning_starts) != 1
+        or planning_starts[0].source_component != "supervisor"
+        or planning_starts[0].phase != RuntimePhase.PLANNING
+    ):
+        raise ArtifactError("artifact requires exactly one supervisor planning start event")
+    planning_start = planning_starts[0]
+    if planning_start.parent_span_id != run_start.span_id or planning_start.payload != {}:
+        raise ArtifactError("planning-start parent span is invalid")
+    planning_transitions = [item for item in transitions if item.phase == RuntimePhase.PLANNING]
+    if (
+        len(planning_transitions) != 1
+        or planning_transitions[0].sequence >= planning_start.sequence
+    ):
+        raise ArtifactError("planning start must follow the accepted planning transition")
 
-    if artifact.status == RunStatus.SUCCEEDED:
-        required = (
-            ("supervisor_planning_end", "supervisor", RuntimePhase.PLANNING),
-            ("supervisor_finalization_start", "supervisor", RuntimePhase.FINALIZING),
-            ("supervisor_finalization_end", "supervisor", RuntimePhase.FINALIZING),
-            ("run_success", "runtime", RuntimePhase.SUCCEEDED),
+    requests_by_turn = {item.logical_turn_id: item for item in artifact.model_requests}
+    attempts_by_request: dict[str, list[ModelAttempt]] = defaultdict(list)
+    for attempt in artifact.model_attempts:
+        attempts_by_request[attempt.request_id].append(attempt)
+    planner_request = requests_by_turn.get("turn-supervisor-plan")
+    if planner_request is not None:
+        for attempt in attempts_by_request.get(planner_request.request_id, []):
+            if attempt.parent_span_id != planning_start.span_id:
+                raise ArtifactError("planner attempt has the wrong planning parent span")
+
+    plan = artifact.final_state.plan
+    planning_ends = events_by_type["supervisor_planning_end"]
+    if len(planning_ends) > 1 or any(
+        item.source_component != "supervisor" or item.phase != RuntimePhase.PLANNING
+        for item in planning_ends
+    ):
+        raise ArtifactError("artifact contains duplicate supervisor planning end events")
+    if planning_ends:
+        if planner_request is None:
+            raise ArtifactError("planning end exists without a planner request")
+        planner_terminal = _terminal_event_for_request(
+            artifact, planner_request, attempts_by_request
         )
-        if any(not matching(*item) for item in required):
+        if (
+            planner_terminal is None
+            or planner_terminal.event_type != "model_attempt_end"
+            or planner_terminal.sequence >= planning_ends[0].sequence
+            or planning_ends[0].span_id != planning_start.span_id
+            or planning_ends[0].parent_span_id != run_start.span_id
+            or plan is None
+            or planning_ends[0].payload != {"assignment_count": len(plan.assignments)}
+        ):
+            raise ArtifactError("planning end is not caused by the planner terminal response")
+
+    if plan is not None:
+        if len(planning_ends) != 1:
+            raise ArtifactError("accepted plan requires exactly one supervisor planning end event")
+        execution_transitions = [
+            item for item in transitions if item.phase == RuntimePhase.EXECUTING_WORKERS
+        ]
+        if (
+            len(execution_transitions) != 1
+            or planning_ends[0].sequence >= execution_transitions[0].sequence
+        ):
+            raise ArtifactError("worker execution transition must follow planning end")
+        dispatches = events_by_type["worker_dispatch"]
+        dispatch_ids = [cast(str, event.payload.get("worker_id")) for event in dispatches]
+        if (
+            len(dispatches) != len(plan.assignments)
+            or set(dispatch_ids) != {item.worker_id for item in plan.assignments}
+            or any(
+                event.payload != {"worker_id": cast(str, event.payload.get("worker_id"))}
+                or event.source_component != "supervisor"
+                or event.phase != RuntimePhase.EXECUTING_WORKERS
+                or event.span_id != planning_start.span_id
+                or event.parent_span_id != run_start.span_id
+                or event.sequence <= execution_transitions[0].sequence
+                for event in dispatches
+            )
+        ):
+            raise ArtifactError("artifact worker-dispatch evidence does not match the plan")
+    elif events_by_type["worker_dispatch"]:
+        raise ArtifactError("artifact contains worker dispatch without an accepted plan")
+
+    worker_terminals = [
+        event for event in artifact.events if event.event_type in {"worker_end", "worker_failure"}
+    ]
+    result_ids = {item.worker_id for item in artifact.final_state.worker_results}
+    planned_ids = {item.worker_id for item in plan.assignments} if plan is not None else set()
+    worker_starts = matching("worker_start")
+    if any(
+        item.source_component not in planned_ids or item.phase != RuntimePhase.EXECUTING_WORKERS
+        for item in worker_starts
+    ) or any(
+        sum(item.source_component == worker_id for item in worker_starts) > 1
+        for worker_id in planned_ids
+    ):
+        raise ArtifactError("worker-start evidence does not match accepted assignments")
+    if any(
+        item.parent_span_id != run_start.span_id or item.span_id == "" for item in worker_starts
+    ):
+        raise ArtifactError("worker-start parent span contradicts the worker lifecycle")
+    if any(event.source_component not in result_ids for event in worker_terminals):
+        raise ArtifactError("worker terminal event has no persisted worker result")
+
+    for worker_id in CANONICAL_EVIDENCE_WORKER_IDS:
+        request = requests_by_turn.get(f"turn-{worker_id}")
+        if request is None:
+            continue
+        starts = matching("worker_start", worker_id, RuntimePhase.EXECUTING_WORKERS)
+        if len(starts) != 1:
+            raise ArtifactError("worker request requires exactly one worker-start lifecycle event")
+        if any(
+            item.parent_span_id != starts[0].span_id
+            for item in attempts_by_request.get(request.request_id, [])
+        ):
+            raise ArtifactError("worker model attempt contradicts its worker lifecycle span")
+
+    for result in artifact.final_state.worker_results:
+        starts = matching("worker_start", result.worker_id, RuntimePhase.EXECUTING_WORKERS)
+        if len(starts) != 1:
+            raise ArtifactError("persisted worker requires exactly one worker-start event")
+        terminal = "worker_end" if result.succeeded else "worker_failure"
+        terminals = matching(terminal, result.worker_id, RuntimePhase.EXECUTING_WORKERS)
+        if len(terminals) != 1 or starts[0].sequence >= terminals[0].sequence:
+            raise ArtifactError("persisted worker requires one causally ordered terminal event")
+        if (
+            starts[0].span_id != terminals[0].span_id
+            or starts[0].parent_span_id != run_start.span_id
+        ):
+            raise ArtifactError("worker lifecycle span context is invalid")
+        expected_payload = {
+            "succeeded": result.succeeded,
+            "failure_id": result.failure.failure_id if result.failure else None,
+            "failure_code": result.failure.code if result.failure else None,
+        }
+        if (
+            terminals[0].payload != expected_payload
+            or terminals[0].parent_span_id != run_start.span_id
+        ):
+            raise ArtifactError("worker terminal payload contradicts its result")
+        calls = [item for item in artifact.tool_calls if item.worker_id == result.worker_id]
+        if calls and any(item.span_id != starts[0].span_id for item in calls):
+            raise ArtifactError("worker tool call has the wrong worker span")
+        request = requests_by_turn.get(f"turn-{result.worker_id}")
+        if request is not None and any(
+            item.parent_span_id != starts[0].span_id
+            for item in attempts_by_request.get(request.request_id, [])
+        ):
+            raise ArtifactError("worker model attempt has the wrong worker parent span")
+        if request is None:
+            raise ArtifactError("worker lifecycle is missing its durable request")
+        model_terminal = _terminal_event_for_request(artifact, request, attempts_by_request)
+        if model_terminal is None or model_terminal.sequence >= terminals[0].sequence:
+            raise ArtifactError("worker terminal event must follow terminal model evidence")
+        tool_terminals = [
+            item
+            for call in calls
+            for tool_result in artifact.tool_results
+            if tool_result.tool_call_id == call.call_id
+            for item in artifact.events
+            if item.span_id == tool_result.attempt_span_id
+            and item.event_type
+            in {"tool_attempt_end", "tool_attempt_failure", "tool_attempt_timeout"}
+        ]
+        if (
+            tool_terminals
+            and max(item.sequence for item in tool_terminals) >= terminals[0].sequence
+        ):
+            raise ArtifactError("worker terminal event must follow terminal tool evidence")
+
+    dispatch_sequence = {
+        cast(str, item.payload.get("worker_id")): item.sequence
+        for item in events_by_type["worker_dispatch"]
+    }
+    for start in worker_starts:
+        assignment = next(
+            (
+                item
+                for item in (plan.assignments if plan is not None else [])
+                if item.worker_id == start.source_component
+            ),
+            None,
+        )
+        if assignment is None or start.payload != {"purpose": assignment.purpose}:
+            raise ArtifactError("worker-start payload does not match its assignment")
+        if start.sequence <= dispatch_sequence.get(
+            start.source_component, len(artifact.events) + 1
+        ):
+            raise ArtifactError("worker start must follow its dispatch event")
+
+    for call in artifact.tool_calls:
+        starts = matching("worker_start", call.worker_id, RuntimePhase.EXECUTING_WORKERS)
+        if len(starts) != 1 or call.span_id != starts[0].span_id:
+            raise ArtifactError("tool call contradicts its worker lifecycle span")
+        request = requests_by_turn.get(f"turn-{call.worker_id}")
+        if request is None:
+            raise ArtifactError("tool call is missing its worker request")
+        model_terminal = _terminal_event_for_request(artifact, request, attempts_by_request)
+        tool_starts = [
+            event
+            for result in artifact.tool_results
+            if result.tool_call_id == call.call_id
+            for event in artifact.events
+            if event.span_id == result.attempt_span_id and event.event_type == "tool_attempt_start"
+        ]
+        if model_terminal is None or any(
+            event.sequence <= model_terminal.sequence for event in tool_starts
+        ):
+            raise ArtifactError("tool attempt must follow the worker terminal model response")
+
+    final_starts = events_by_type["supervisor_finalization_start"]
+    final_ends = events_by_type["supervisor_finalization_end"]
+    if (
+        len(final_starts) > 1
+        or len(final_ends) > 1
+        or any(
+            item.source_component != "supervisor" or item.phase != RuntimePhase.FINALIZING
+            for item in [*final_starts, *final_ends]
+        )
+    ):
+        raise ArtifactError("artifact contains duplicate supervisor finalization lifecycle events")
+    finalizer_request = requests_by_turn.get("turn-supervisor-finalize")
+    if finalizer_request is not None:
+        if len(final_starts) != 1:
+            raise ArtifactError("finalizer request requires one finalization-start event")
+        if final_starts[0].parent_span_id != run_start.span_id:
+            raise ArtifactError("finalization-start parent span is invalid")
+        if final_starts[0].payload != {}:
+            raise ArtifactError("finalization-start payload is invalid")
+        finalizing_transitions = [
+            item for item in transitions if item.phase == RuntimePhase.FINALIZING
+        ]
+        if (
+            len(finalizing_transitions) != 1
+            or finalizing_transitions[0].sequence >= final_starts[0].sequence
+            or any(item.sequence >= finalizing_transitions[0].sequence for item in worker_terminals)
+        ):
+            raise ArtifactError("finalization must follow completed worker evidence")
+        if any(
+            item.parent_span_id != final_starts[0].span_id
+            for item in attempts_by_request.get(finalizer_request.request_id, [])
+        ):
+            raise ArtifactError("finalizer attempt has the wrong finalization parent span")
+    if final_ends:
+        if finalizer_request is None or not final_starts:
+            raise ArtifactError("finalization end exists without a finalizer request")
+        final_terminal = _terminal_event_for_request(
+            artifact, finalizer_request, attempts_by_request
+        )
+        if (
+            final_terminal is None
+            or final_terminal.event_type != "model_attempt_end"
+            or final_terminal.sequence >= final_ends[0].sequence
+            or final_ends[0].span_id != final_starts[0].span_id
+            or final_ends[0].parent_span_id != run_start.span_id
+            or artifact.final_decision is None
+            or final_ends[0].payload != {"decision_code": artifact.final_decision.decision_code}
+        ):
+            raise ArtifactError("finalization end is not caused by the finalizer response")
+    if artifact.final_decision is not None and len(final_ends) != 1:
+        raise ArtifactError("accepted final decision requires one finalization-end event")
+
+    terminal_types = {"run_success", "run_failure", "run_cancellation"}
+    run_terminals = [event for event in artifact.events if event.event_type in terminal_types]
+    if len(run_terminals) != 1 or run_terminals[0].sequence >= persistence[0].sequence:
+        raise ArtifactError("artifact requires exactly one terminal run event before persistence")
+    run_terminal = run_terminals[0]
+    expected_terminal = {
+        RunStatus.SUCCEEDED: ("run_success", RuntimePhase.SUCCEEDED),
+        RunStatus.FAILED: ("run_failure", RuntimePhase.FAILED),
+        RunStatus.CANCELLED: ("run_cancellation", RuntimePhase.CANCELLED),
+    }[artifact.status]
+    if (run_terminal.event_type, run_terminal.phase) != expected_terminal:
+        raise ArtifactError("terminal run event contradicts artifact status")
+    if artifact.status == RunStatus.SUCCEEDED:
+        if len(planning_ends) != 1 or len(final_starts) != 1 or len(final_ends) != 1:
             raise ArtifactError("successful artifact is missing required lifecycle evidence")
-    elif artifact.status == RunStatus.FAILED:
-        if not matching("run_failure", phase=RuntimePhase.FAILED):
-            raise ArtifactError("failed artifact is missing run_failure evidence")
-    elif not matching("run_cancellation", "runtime", RuntimePhase.CANCELLED):
-        raise ArtifactError("cancelled artifact is missing run_cancellation evidence")
+        if artifact.final_decision is None:  # guarded by top-level status validation
+            raise ArtifactError("successful artifact requires a final decision")
+        if run_terminal.payload != {"decision_code": artifact.final_decision.decision_code}:
+            raise ArtifactError("run_success payload contradicts the final decision")
+        if (
+            run_terminal.source_component != "runtime"
+            or run_terminal.span_id != run_start.span_id
+            or run_terminal.parent_span_id is not None
+        ):
+            raise ArtifactError("run_success context contradicts the finalization lifecycle")
+        success_transitions = [item for item in transitions if item.phase == RuntimePhase.SUCCEEDED]
+        if (
+            len(success_transitions) != 1
+            or final_ends[0].sequence >= success_transitions[0].sequence
+            or success_transitions[0].sequence >= run_terminal.sequence
+        ):
+            raise ArtifactError("run success must follow finalization end and success transition")
+    else:
+        failure_id = run_terminal.payload.get("failure_id")
+        failure_code = run_terminal.payload.get("failure_code")
+        failure = next((item for item in artifact.failures if item.failure_id == failure_id), None)
+        if failure is None or failure.code != failure_code:
+            raise ArtifactError("terminal run event references an absent or contradictory failure")
+        expected_failure_payload = {
+            "failure_id": failure.failure_id,
+            "failure_code": failure.code,
+        }
+        if artifact.status == RunStatus.CANCELLED:
+            if run_terminal.payload != {
+                "active_workers_after_cleanup": 0,
+                **expected_failure_payload,
+            }:
+                raise ArtifactError("run cancellation payload must prove zero active workers")
+        elif run_terminal.payload != expected_failure_payload:
+            raise ArtifactError("run failure payload contradicts its terminal failure")
+        if run_terminal.source_component != failure.source_component:
+            raise ArtifactError("terminal run event source contradicts its failure")
+        if failure.model_attempt_id is not None:
+            linked = next(
+                (
+                    item
+                    for item in artifact.model_attempts
+                    if item.attempt_id == failure.model_attempt_id
+                ),
+                None,
+            )
+            if linked is None:
+                raise ArtifactError("terminal run failure references an absent model attempt")
+            request_attempts = sorted(
+                (item for item in artifact.model_attempts if item.request_id == linked.request_id),
+                key=lambda item: item.attempt,
+            )
+            if (
+                not request_attempts
+                or linked != request_attempts[-1]
+                or linked.failure != failure
+                or run_terminal.span_id != linked.parent_span_id
+                or run_terminal.parent_span_id != run_start.span_id
+            ):
+                raise ArtifactError("terminal run event references a nonterminal model failure")
+        elif failure.span_id == run_start.span_id:
+            if (
+                failure.source_component != "runtime"
+                or run_terminal.span_id != run_start.span_id
+                or run_terminal.parent_span_id is not None
+            ):
+                raise ArtifactError("terminal runtime failure span context is invalid")
+        elif (
+            failure.source_component != "supervisor"
+            or run_terminal.span_id != failure.span_id
+            or run_terminal.parent_span_id != run_start.span_id
+        ):
+            raise ArtifactError("terminal run failure span context is invalid")
+
+        terminal_transition = next(
+            (item for item in transitions if item.phase == artifact.final_state.phase),
+            None,
+        )
+        if (
+            terminal_transition is not None
+            and terminal_transition.source_component != run_terminal.source_component
+        ):
+            raise ArtifactError("terminal transition source contradicts the terminal run event")
+
+    terminal_transitions = [
+        item for item in transitions if item.phase == artifact.final_state.phase
+    ]
+    if len(terminal_transitions) != 1 or terminal_transitions[0].sequence >= run_terminal.sequence:
+        raise ArtifactError("terminal run event must follow its accepted terminal transition")
+
+
+def _terminal_event_for_request(
+    artifact: RunArtifact,
+    request: ModelRequestRecord,
+    attempts_by_request: dict[str, list[ModelAttempt]],
+) -> AgentEvent | None:
+    attempts = sorted(
+        attempts_by_request.get(request.request_id, []), key=lambda item: item.attempt
+    )
+    if not attempts:
+        return None
+    terminal_id = attempts[-1].attempt_id
+    terminal_types = {"model_attempt_end", "model_attempt_failure", "model_attempt_timeout"}
+    events = [
+        item
+        for item in artifact.events
+        if item.span_id == terminal_id and item.event_type in terminal_types
+    ]
+    return events[0] if len(events) == 1 else None
 
 
 def _reject_private_or_secret_data(payload: Any) -> None:
