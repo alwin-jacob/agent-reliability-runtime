@@ -2,7 +2,7 @@
 
 ## Boundaries
 
-`domain.py` defines strict, frozen, serialization-safe runtime values. `providers/` owns the asynchronous raw-response model boundary. `tools/` owns definitions, policy checks, Pydantic input/output validation, and in-memory retail fixtures. `invocation.py` owns attempt timeout/retry/cancellation behavior. `orchestration.py` owns LangGraph nodes and run-scoped injected services. `artifacts.py` owns fingerprints, semantic invariants, JSON Schema, and atomic persistence. `runtime.py` resolves confined inputs, constructs services, executes the graph, and assembles artifacts. `cli.py` is a thin exit-code and compact-JSON interface.
+`domain.py` defines strict, frozen, serialization-safe runtime values. `providers/` owns the asynchronous raw-response model boundary. `tools/` owns definitions, policy checks, Pydantic input/output validation, and in-memory retail fixtures. `invocation.py` owns attempt timeout/retry/cancellation behavior. `semantics.py` owns pure Stage 1 plan, task-bound tool-request, worker-evidence, and final-decision rules without importing LangGraph. `orchestration.py` owns LangGraph nodes and run-scoped injected services. `artifacts.py` owns fingerprints, cross-record validation, JSON Schema, and atomic persistence while calling the same pure semantics. `runtime.py` resolves confined inputs, constructs services, executes the graph, and assembles artifacts. `cli.py` is a thin exit-code and compact-JSON interface.
 
 Generic datasets, scoring, regression analysis, and evaluation artifacts belong to `llm-eval-reliability`, not this repository.
 
@@ -12,7 +12,9 @@ The compiled low-level `StateGraph` has three node definitions:
 
 1. `supervisor_plan` invokes the raw fixture provider, parses a `SupervisorPlan`, enforces the exact two-worker Stage 1 contract, and transitions to `executing_workers`.
 2. A conditional edge returns two `langgraph.types.Send` values. Both target the same generic `worker` node with a distinct `WorkerAssignment`. A reducer appends each `WorkerResult`.
-3. `supervisor_finalize` requires successful `order-worker` and `policy-worker` evidence, invokes the final fixture decision, cross-checks its order/policy references, and transitions to `succeeded`.
+3. `supervisor_finalize` requires successful `order-worker` and `policy-worker` evidence, invokes the final fixture decision, and applies the pure semantic validator before transitioning to `succeeded`.
+
+The task carries `as_of_date`, `item_condition`, `market`, `item_category`, and `purchase_channel`. Each worker call must exactly match the applicable task fields. Finalization independently validates delivered order status, task/order/policy context equality, condition equality, and authoritative fees/window evidence. It calculates whole calendar days with standard-library dates, rejects a decision date before delivery, treats the window as inclusive, and requires the canonical eligible/ineligible code and exactly both worker IDs.
 
 Each worker acquires the explicit run-scoped semaphore before recording its active section. The overlap test injects a deterministic barrier: neither worker can proceed until both have entered. With a sequential implementation that test times out and fails. A separate configured-bound test observes a maximum of one active worker when the semaphore limit is one.
 
@@ -32,13 +34,13 @@ initialized -> planning -> executing_workers -> finalizing -> succeeded
 
 ## Model and tool boundaries
 
-The `ModelProvider` protocol is asynchronous and provider-independent. Stage 1 implements only a versioned scripted fixture provider. It returns `ModelResponse.raw_json`; parsing into `SupervisorPlan`, worker tool requests, or `FinalDecision` occurs after provider invocation so malformed and schema-invalid output paths are real. The provider can script success, transient failure then success, permanent failure, delay/timeout, malformed JSON, schema-invalid JSON, and cancellation. Any fixture token values must be labeled synthetic.
+The `ModelProvider` protocol is asynchronous and provider-independent. Stage 1 implements only a versioned scripted fixture provider. It returns `ModelResponse.raw_json`; parsing into `SupervisorPlan`, worker tool requests, or `FinalDecision` occurs after provider invocation so malformed and schema-invalid output paths are real. The provider can script success, transient failure then success, permanent failure, delay/timeout, malformed JSON, schema-invalid JSON, and cancellation. Any fixture token values must be labeled synthetic. `LoadedInputs` retains that provider's mutable response counters and is therefore a one-execution value. Per-run provider construction is required before repeated sampling.
 
-Tools publish typed definitions with generated input/output schemas and fixed metadata: no network, no filesystem, no side effects, and idempotent. Fixture files are read during setup into memory. Worker invocation first records the logical request, then checks existence and allowed-tool policy, validates input, executes through the common policy, and validates each attempt's output before accepting it.
+Tools publish typed definitions with generated input/output schemas and fixed metadata: no network, no filesystem, no side effects, and idempotent. Fixture files are read during setup into memory. Worker invocation first records the logical tool call, then checks existence and allowed-tool policy, validates input, executes through the common policy, and validates each attempt's output before accepting it.
 
 ## Retry ownership and accounting
 
-One logical model turn is one runtime request for a model decision excluding retries; every provider try is a model attempt. One logical tool call is one requested tool operation; every execution try is a tool attempt. Attempts record start/end timestamps, duration, outcome, response/output or failure, and trace IDs. Accounting is derived from these records and validation derives it again.
+One logical model turn is one runtime request for a model decision excluding retries; every provider try is a model attempt. One logical tool call is one requested tool operation; every execution try is a tool attempt. Attempts record start/end timestamps, duration, outcome, response/output or failure, and trace IDs. Model attempts and successful provider responses are persisted, but exact `ModelRequest` payloads are not. Request persistence or request digests must be decided before trajectory replay or real-provider evaluation. Accounting is derived from attempt records and validation derives it again.
 
 The common invocation function applies an independent `asyncio.timeout` to every attempt. Typed retryable provider/tool failures, timeout, and explicitly typed transient infrastructure failures may retry. Exponential backoff is capped; fixture-stage jitter is constrained to zero. Model-output, policy, input/output validation, unknown-tool, cancellation, and unexpected unclassified failures do not retry. The graph itself is never retried.
 
@@ -46,7 +48,7 @@ A future evaluation adapter should configure the evaluation engine's outer candi
 
 ## Cancellation
 
-`CancelledError` is observed for the active attempt, never converted to `InvocationFailed`, and re-raised. Worker `finally` blocks leave the active section and release semaphore capacity. The runtime records a typed cancellation failure and terminal transition, snapshots evidence after cleanup, atomically persists a cancelled artifact when the destination is writable, and re-raises cancellation. Persistence is shielded only for that cleanup write.
+`CancelledError` is observed for the active attempt, never converted to `InvocationFailed`, and re-raised. Worker `finally` blocks leave the active section and release semaphore capacity. The runtime records a typed cancellation failure and terminal transition, snapshots evidence after cleanup, and attempts to atomically persist a cancelled artifact. A persistence failure becomes a sanitized note on the original cancellation and never replaces it. `PhaseManager` records the transition event before publishing its new in-memory phase, preventing a cancelled event write from leaving an unrecorded phase change. No checkpointer is involved.
 
 ## Event ordering
 
@@ -54,7 +56,9 @@ The in-memory recorder assigns sequence numbers under an `asyncio.Lock`. Artifac
 
 ## Artifact integrity and reproducibility
 
-`content_sha256` is SHA-256 of canonical JSON with that field omitted. The configuration fingerprint binds embedded task/effective config plus task/config/fixture digests. The semantic fingerprint binds those digests, final decision, normalized provider/tool outcomes, sorted required event type/source pairs, failure codes, and accounting while excluding IDs, timestamps, durations, source commit/dirty state, and destination.
+`content_sha256` is SHA-256 of canonical JSON with that field omitted. The configuration fingerprint binds embedded task/effective config plus task/config/fixture digests. The semantic fingerprint binds those digests, final decision, normalized provider/tool outcomes, sorted required event type/source pairs, failure codes, and accounting while excluding IDs, timestamps, durations, source commit/dirty state, and destination. These unkeyed hashes detect unsealed or accidental modification; they are not digital signatures, and a writer with modification access can recompute them.
+
+Artifact validation separately enforces task/decision equality across top-level and final state, exact successful worker/call/result reconciliation, the Stage 1 plan and task-bound call contracts, unique durable IDs, contiguous attempt numbering, UTC `Z` timestamps and interval ordering, and the same pure final-decision semantics used live. Semantic validation, provenance, repository history, and later release controls provide evidence layers beyond hashes.
 
 Full artifacts are expected to differ in volatile run/event/attempt/tool IDs, timestamps, durations, actual concurrent event order, source commit/dirty provenance, and destination-external context. Tests remove exactly those fields, normalize event order, and compare everything else across two runs. Semantic fingerprints must match.
 

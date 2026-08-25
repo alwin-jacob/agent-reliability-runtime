@@ -31,14 +31,17 @@ EXPECTED_DECISION = FinalDecision(
     ),
     next_action="Start the online return for ORD-1001 and send the item back unopened.",
     order_id="ORD-1001",
+    as_of_date="2026-08-25",
+    days_since_delivery=15,
     policy_window_days=30,
+    applicable_fees="none",
     evidence_worker_ids=["order-worker", "policy-worker"],
 )
 
 
 def success_script() -> dict[str, Any]:
     return {
-        "schema_version": "0.1.0",
+        "schema_version": "0.2.0",
         "provider_id": "test-fixture",
         "responses": {
             "supervisor_plan": [
@@ -105,16 +108,26 @@ def make_loaded(
     *,
     script: dict[str, Any] | None = None,
     config_changes: Mapping[str, Any] | None = None,
+    task_changes: Mapping[str, Any] | None = None,
+    order_changes: Mapping[str, Any] | None = None,
+    policy_changes: Mapping[str, Any] | None = None,
 ) -> LoadedInputs:
     root.mkdir(parents=True, exist_ok=True)
     task = {
-        "schema_version": "0.1.0",
+        "schema_version": "0.2.0",
         "task_id": "retail-return-test",
         "customer_request": "Can the unopened item be returned?",
         "order_id": "ORD-1001",
+        "as_of_date": "2026-08-25",
+        "item_condition": "unopened",
+        "market": "US",
+        "item_category": "household",
+        "purchase_channel": "online",
     }
+    if task_changes:
+        task.update(task_changes)
     config: dict[str, Any] = {
-        "schema_version": "0.1.0",
+        "schema_version": "0.2.0",
         "provider": "fixture",
         "model_fixture": "model.json",
         "order_fixture": "orders.json",
@@ -137,8 +150,8 @@ def make_loaded(
     }
     if config_changes:
         config.update(config_changes)
-    orders = {
-        "schema_version": "0.1.0",
+    orders: dict[str, Any] = {
+        "schema_version": "0.2.0",
         "delay_seconds": 0.001,
         "orders": [
             {
@@ -151,8 +164,10 @@ def make_loaded(
             }
         ],
     }
-    policies = {
-        "schema_version": "0.1.0",
+    if order_changes:
+        cast(list[dict[str, Any]], orders["orders"])[0].update(order_changes)
+    policies: dict[str, Any] = {
+        "schema_version": "0.2.0",
         "delay_seconds": 0.001,
         "policies": [
             {
@@ -165,6 +180,8 @@ def make_loaded(
             }
         ],
     }
+    if policy_changes:
+        cast(list[dict[str, Any]], policies["policies"])[0].update(policy_changes)
     _write_json(root / "task.json", task)
     _write_json(root / "config.json", config)
     _write_json(root / "model.json", script or success_script())
@@ -254,6 +271,7 @@ class ScriptedTool:
 def scripted_registry(
     *,
     order_output: dict[str, Any] | None = None,
+    policy_output: dict[str, Any] | None = None,
     order_transient_failures: int = 0,
     order_delay: float = 0.0,
 ) -> tuple[ToolRegistry, ScriptedTool]:
@@ -277,7 +295,8 @@ def scripted_registry(
         definition=LookupReturnPolicyTool.definition,
         input_model=LookupReturnPolicyInput,
         output_model=LookupReturnPolicyOutput,
-        output={
+        output=policy_output
+        or {
             "market": "US",
             "item_category": "household",
             "purchase_channel": "online",

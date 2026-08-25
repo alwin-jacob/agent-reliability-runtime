@@ -38,7 +38,7 @@ class _FixtureBehavior(BaseModel):
 class _FixtureScript(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    schema_version: Literal["0.1.0"]
+    schema_version: Literal["0.2.0"]
     provider_id: str = Field(min_length=1)
     responses: dict[str, list[_FixtureBehavior]]
 

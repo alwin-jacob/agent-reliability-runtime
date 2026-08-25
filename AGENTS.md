@@ -14,15 +14,15 @@ Use the repository-local locked environment. Before a local commit, run the chec
 
 ```sh
 uv lock --check
-uv sync --frozen --extra dev
+uv sync --python 3.13 --frozen --extra dev
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src tests
 uv run pytest -q
 uv run python scripts/check_schema_sync.py
-rm -f /tmp/retail-return-v1.run.json
-uv run agent-runtime run --task examples/tasks/retail-return-v1.json --config examples/configs/deterministic-v1.json --output /tmp/retail-return-v1.run.json
-uv run agent-runtime validate-artifact /tmp/retail-return-v1.run.json
+rm -f /tmp/retail-return-v2.run.json
+uv run agent-runtime run --task examples/tasks/retail-return-v1.json --config examples/configs/deterministic-v1.json --output /tmp/retail-return-v2.run.json
+uv run agent-runtime validate-artifact /tmp/retail-return-v2.run.json
 uv run python scripts/verify_example.py
 git diff --check
 git status --short

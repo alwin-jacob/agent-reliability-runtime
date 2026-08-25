@@ -11,7 +11,7 @@
   "order_fixture": "examples/fixtures/order-database-v1.json",
   "policy_fixture": "examples/fixtures/return-policy-v1.json",
   "provider": "fixture",
-  "schema_version": "0.1.0",
+  "schema_version": "0.2.0",
   "tool_retry": {
     "initial_backoff_seconds": 0.0,
     "jitter_ratio": 0.0,

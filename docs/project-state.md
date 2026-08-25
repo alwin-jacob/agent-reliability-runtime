@@ -6,23 +6,23 @@ This local repository owns agent runtime execution and runtime evidence. Generic
 
 ## Current evidence
 
-The implementation uses a low-level LangGraph supervisor/two-worker graph, strict Pydantic v2 models, one deterministic raw-JSON fixture provider, two typed in-memory retail tools, a shared invocation policy, bounded worker concurrency, typed failures, cancellation propagation, structured events, exact accounting, versioned/hashed artifacts, atomic persistence, validation CLI, generated JSON Schema, offline tests, and a configured Python 3.11-3.13 CI matrix.
+The implementation uses a low-level LangGraph supervisor/two-worker graph, strict Pydantic v2 schema 0.2.0 models, explicit task decision context, one deterministic raw-JSON fixture provider, two typed in-memory retail tools, one pure live/replay semantic validator, a shared invocation policy, bounded worker concurrency, typed failures, cancellation preservation, structured events, exact accounting, cross-record artifact validation, atomic persistence, validation CLI, generated JSON Schema, offline tests, and a configured Python 3.11-3.13 CI matrix.
 
-The checked successful artifact was generated from a clean tree at implementation commit `ceedafaf1a6309f6b7004c1f4aeba09d87a7b324`. It validates and reproduces the exact final decision and semantic/configuration fingerprints. The independent review's eight findings were fixed, regression-tested, and independently verified. The reviewer changed no files.
+The current checked successful artifact uses schema 0.2.0 and validates/reproduces its exact final decision and semantic/configuration fingerprints. The prior schema 0.1.0 remains historical evidence. A later independent read-only source audit, distinct from the earlier implementation-agent review, confirmed the semantic and artifact-integrity defects corrected in this milestone; the audit agent changed no files.
 
-Public-release licensing is unresolved; no LICENSE is present. Remote CI has not run. Direct CLI startup on local Python 3.14 emits an upstream compatibility warning to stderr; the supported/configured matrix is 3.11-3.13.
+Public-release licensing is unresolved; no LICENSE is present. Authoritative local verification ran on Python 3.13.15. Python 3.11/3.12 and remote CI did not run in this corrective milestone.
 
 ## Status fields
 
 - As-of date: 2026-08-25
-- Current stage: Stage 0 foundation and deterministic Stage 1 vertical slice complete
-- Implemented features: low-level supervisor/worker LangGraph, two-worker bounded concurrency, fixture provider, typed fixture tools, classified retry/timeout/cancellation, events/accounting, validated atomic artifact, CLI, offline tests, and CI configuration
-- Exact local test status: 53 passed; Ruff check passed; Ruff format check passed; strict mypy passed; schema sync and deterministic example verification passed
+- Current stage: Stage 0 foundation and semantically hardened deterministic Stage 1 vertical slice complete
+- Implemented features: low-level supervisor/worker LangGraph, two-worker bounded concurrency, typed decision context and evidence binding, fixture provider, typed fixture tools, classified retry/timeout/cancellation, events/accounting, validated atomic schema 0.2.0 artifact, CLI, offline tests, and CI configuration
+- Exact local test status: 115 passed on Python 3.13.15; Ruff check passed; Ruff format check passed; strict mypy passed; schema sync and deterministic example verification passed
 - Claim/evidence status: only Stage 1 local-runtime claims in `docs/claim-evidence.md` are implemented; remote CI and all later-stage/measurement claims remain unsupported
-- Blockers: none for Stage 1 completion
+- Blockers: exact request persistence or request digests before trajectory replay/real-provider evaluation; per-run provider construction before repeated sampling
 - Paid-resource use: none
 - Visibility: local-only
 - Git remote status: none
-- Last verified local commit: current evidence `HEAD`; clean artifact provenance commit `ceedafaf1a6309f6b7004c1f4aeba09d87a7b324`
-- Unresolved risks: no crash recovery/checkpointer, no process resume, one-process in-memory evidence, fixture-only behavior, local Python outside CI matrix, no remote CI evidence, and unresolved public-release license
-- Next stage: separately scope checkpoint/resume compatibility and human-interrupt design; no next implementation task is issued here
+- Last verified local commit: current evidence `HEAD`; checked artifact records its clean implementation source commit
+- Unresolved risks: no exact model-request replay, stateful one-execution loaded provider, no crash recovery/checkpointer, no process resume, one-process in-memory evidence, fixture-only behavior, no Python 3.11/3.12 or remote CI execution evidence, and unresolved public-release license
+- Next stage: first decide durable model-request payloads versus request digests for replay/evaluation and per-run provider construction for sampling; checkpoint/resume and human-interrupt design remain separate Stage 2 scope

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import re
+from datetime import date
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
-SCHEMA_VERSION = "0.1.0"
+SCHEMA_VERSION = "0.2.0"
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+PurchaseChannel = Literal["online", "store"]
+DecisionCode = Literal["RETURN_ELIGIBLE", "RETURN_INELIGIBLE"]
+_CALENDAR_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class StrictModel(BaseModel):
@@ -81,10 +86,28 @@ class FailureOrigin(StrEnum):
 
 
 class TaskSpec(StrictModel):
-    schema_version: Literal["0.1.0"] = "0.1.0"
+    schema_version: Literal["0.2.0"] = "0.2.0"
     task_id: str = Field(min_length=1)
     customer_request: str = Field(min_length=1)
     order_id: str = Field(min_length=1)
+    as_of_date: str
+    item_condition: str = Field(min_length=1)
+    market: str = Field(min_length=1)
+    item_category: str = Field(min_length=1)
+    purchase_channel: PurchaseChannel
+
+    @field_validator("as_of_date")
+    @classmethod
+    def validate_as_of_date(cls, value: str) -> str:
+        if _CALENDAR_DATE.fullmatch(value) is None:
+            raise ValueError("as_of_date must use exact YYYY-MM-DD format")
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("as_of_date must be a valid calendar date") from error
+        if parsed.isoformat() != value:  # pragma: no cover - regex and fromisoformat are exact
+            raise ValueError("as_of_date must use exact YYYY-MM-DD format")
+        return value
 
 
 class RetryPolicy(StrictModel):
@@ -102,7 +125,7 @@ class RetryPolicy(StrictModel):
 
 
 class RunConfig(StrictModel):
-    schema_version: Literal["0.1.0"] = "0.1.0"
+    schema_version: Literal["0.2.0"] = "0.2.0"
     provider: Literal["fixture"]
     model_fixture: str = Field(min_length=1)
     order_fixture: str = Field(min_length=1)
@@ -267,11 +290,14 @@ class AgentEvent(StrictModel):
 
 class FinalDecision(StrictModel):
     eligible: bool
-    decision_code: str = Field(min_length=1)
+    decision_code: DecisionCode
     reason: str = Field(min_length=1)
     next_action: str = Field(min_length=1)
     order_id: str = Field(min_length=1)
+    as_of_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    days_since_delivery: int = Field(ge=0)
     policy_window_days: int = Field(ge=0)
+    applicable_fees: str = Field(min_length=1)
     evidence_worker_ids: list[str] = Field(min_length=2)
 
     @model_validator(mode="after")
@@ -332,7 +358,7 @@ class Provenance(StrictModel):
 
 
 class RunArtifact(StrictModel):
-    schema_version: Literal["0.1.0"] = "0.1.0"
+    schema_version: Literal["0.2.0"] = "0.2.0"
     artifact_type: Literal["agent_runtime_run"] = "agent_runtime_run"
     run_id: str = Field(min_length=1)
     status: RunStatus

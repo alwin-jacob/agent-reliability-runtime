@@ -27,7 +27,7 @@ from agent_runtime.domain import (
     RuntimePhase,
     TaskSpec,
 )
-from agent_runtime.errors import ConfigurationError, unexpected_failure
+from agent_runtime.errors import ConfigurationError, sanitize_message, unexpected_failure
 from agent_runtime.events import EventRecorder, isoformat_utc, utc_now
 from agent_runtime.orchestration import (
     GraphState,
@@ -138,15 +138,21 @@ async def execute_loaded(
         graph = build_graph()
         raw_result = await graph.ainvoke(graph_state, context=context)
         graph_state = cast(GraphState, raw_result)
-    except asyncio.CancelledError:
-        await _persist_cancelled(
-            loaded=loaded,
-            services=services,
-            state=graph_state,
-            run_id=run_id,
-            started_at=started_at,
-            output_path=output_path,
-        )
+    except asyncio.CancelledError as cancellation:
+        try:
+            await _persist_cancelled(
+                loaded=loaded,
+                services=services,
+                state=graph_state,
+                run_id=run_id,
+                started_at=started_at,
+                output_path=output_path,
+            )
+        except BaseException as persistence_error:
+            cancellation.add_note(
+                "cancelled-artifact persistence failed: "
+                f"{type(persistence_error).__name__}: {sanitize_message(persistence_error)}"
+            )
         raise
     except Exception as error:
         failure = unexpected_failure(

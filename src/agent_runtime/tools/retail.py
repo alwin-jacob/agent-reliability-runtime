@@ -45,13 +45,13 @@ class LookupReturnPolicyOutput(_ToolModel):
 
 
 class _OrderFixture(_ToolModel):
-    schema_version: Literal["0.1.0"]
+    schema_version: Literal["0.2.0"]
     delay_seconds: float = Field(default=0.0, ge=0, le=300)
     orders: list[LookupOrderOutput]
 
 
 class _PolicyFixture(_ToolModel):
-    schema_version: Literal["0.1.0"]
+    schema_version: Literal["0.2.0"]
     delay_seconds: float = Field(default=0.0, ge=0, le=300)
     policies: list[LookupReturnPolicyOutput]
 

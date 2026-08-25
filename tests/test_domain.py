@@ -12,10 +12,15 @@ def test_strict_model_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         TaskSpec.model_validate(
             {
-                "schema_version": "0.1.0",
+                "schema_version": "0.2.0",
                 "task_id": "t",
                 "customer_request": "request",
                 "order_id": "ORD-1",
+                "as_of_date": "2026-08-25",
+                "item_condition": "unopened",
+                "market": "US",
+                "item_category": "household",
+                "purchase_channel": "online",
                 "unknown": True,
             }
         )
