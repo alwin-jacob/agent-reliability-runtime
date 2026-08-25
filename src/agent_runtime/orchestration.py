@@ -480,13 +480,17 @@ def build_graph() -> CompiledStateGraph[GraphState, RuntimeContext, GraphState, 
 async def supervisor_plan_node(state: GraphState, runtime: Runtime[RuntimeContext]) -> GraphState:
     services = runtime.context.services
     span_id = f"span-plan-{uuid4().hex}"
-    await services.recorder.record(
-        "supervisor_planning_start",
-        source_component="supervisor",
-        phase=RuntimePhase.PLANNING,
-        span_id=span_id,
-        parent_span_id=services.run_span_id,
-    )
+
+    async def commit_planning_start() -> None:
+        await services.recorder.record(
+            "supervisor_planning_start",
+            source_component="supervisor",
+            phase=RuntimePhase.PLANNING,
+            span_id=span_id,
+            parent_span_id=services.run_span_id,
+        )
+
+    await complete_cancellation_safe(commit_planning_start)
     request = _model_request(
         logical_turn_id="turn-supervisor-plan",
         source_component="supervisor",

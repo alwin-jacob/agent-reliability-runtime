@@ -157,6 +157,313 @@ def _replace_attempt_terminal_event(
     return artifact.model_copy(update={"events": events})
 
 
+async def _model_retry_then_success_artifact(tmp_path: Path) -> RunArtifact:
+    script = success_script()
+    success = script["responses"]["supervisor_plan"][0]
+    script["responses"]["supervisor_plan"] = [
+        {"kind": "transient_failure", "code": "planner_busy"},
+        success,
+    ]
+    return await execute_loaded(
+        make_loaded(tmp_path, script=script), output_path=tmp_path / "model-retry.json"
+    )
+
+
+async def _model_timeout_then_success_artifact(tmp_path: Path) -> RunArtifact:
+    script = success_script()
+    success = script["responses"]["supervisor_plan"][0]
+    script["responses"]["supervisor_plan"] = [
+        {**success, "delay_seconds": 0.05},
+        success,
+    ]
+    loaded = make_loaded(
+        tmp_path,
+        script=script,
+        config_changes={
+            "model_retry": {
+                "max_attempts": 2,
+                "timeout_seconds": 0.001,
+                "initial_backoff_seconds": 0.0,
+                "max_backoff_seconds": 0.0,
+                "jitter_ratio": 0.0,
+            }
+        },
+    )
+    return await execute_loaded(loaded, output_path=tmp_path / "model-timeout.json")
+
+
+async def _tool_retry_then_success_artifact(tmp_path: Path) -> RunArtifact:
+    loaded = make_loaded(tmp_path)
+    registry, _ = scripted_registry(order_transient_failures=1)
+    return await execute_loaded(
+        replace(loaded, tools=registry), output_path=tmp_path / "tool-retry.json"
+    )
+
+
+async def _tool_timeout_artifact(tmp_path: Path) -> RunArtifact:
+    loaded = make_loaded(
+        tmp_path,
+        config_changes={
+            "tool_retry": {
+                "max_attempts": 2,
+                "timeout_seconds": 0.001,
+                "initial_backoff_seconds": 0.0,
+                "max_backoff_seconds": 0.0,
+                "jitter_ratio": 0.0,
+            }
+        },
+    )
+    registry, _ = scripted_registry(order_delay=0.05)
+    return await execute_loaded(
+        replace(loaded, tools=registry), output_path=tmp_path / "tool-timeout.json"
+    )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [FailureOrigin.TOOL_EXECUTION, FailureOrigin.MODEL_OUTPUT],
+    ids=["case-01-tool-execution-origin", "case-02-model-output-origin"],
+)
+@pytest.mark.asyncio
+async def test_model_attempt_rejects_non_provider_retry_origin(
+    tmp_path: Path, origin: FailureOrigin
+) -> None:
+    artifact = await _model_retry_then_success_artifact(tmp_path)
+    failure = next(item for item in artifact.failures if item.code == "planner_busy")
+    forged = _replace_failure(artifact, failure, failure.model_copy(update={"origin": origin}))
+
+    with pytest.raises(ArtifactError, match=r"model.*(taxonomy|provider|failure)"):
+        validate_artifact(_reseal(forged))
+
+
+@pytest.mark.asyncio
+async def test_model_attempt_rejects_retryable_unexpected_exception_followed_by_success(
+    tmp_path: Path,
+) -> None:
+    artifact = await _model_retry_then_success_artifact(tmp_path)
+    failure = next(item for item in artifact.failures if item.code == "planner_busy")
+    replacement = failure.model_copy(
+        update={
+            "code": "unexpected_invocation_error",
+            "origin": FailureOrigin.UNEXPECTED_INTERNAL,
+            "retryable": True,
+            "exception_type": "RuntimeError",
+        }
+    )
+
+    with pytest.raises(ArtifactError, match=r"model.*unexpected.*(taxonomy|retry)"):
+        validate_artifact(_reseal(_replace_failure(artifact, failure, replacement)))
+
+
+@pytest.mark.asyncio
+async def test_reserved_model_timeout_code_cannot_have_failed_outcome(tmp_path: Path) -> None:
+    artifact = await _model_retry_then_success_artifact(tmp_path)
+    failure = next(item for item in artifact.failures if item.code == "planner_busy")
+    replacement = failure.model_copy(
+        update={"code": "model_attempt_timeout", "exception_type": "TimeoutError"}
+    )
+
+    with pytest.raises(ArtifactError, match=r"model.*timeout.*(outcome|taxonomy|reserved)"):
+        validate_artifact(_reseal(_replace_failure(artifact, failure, replacement)))
+
+
+@pytest.mark.asyncio
+async def test_timed_out_model_attempt_requires_timeout_error_exception(tmp_path: Path) -> None:
+    artifact = await _model_timeout_then_success_artifact(tmp_path)
+    failure = next(
+        item.failure for item in artifact.model_attempts if item.outcome == AttemptOutcome.TIMED_OUT
+    )
+    assert failure is not None
+    replacement = failure.model_copy(update={"exception_type": "RuntimeError"})
+
+    with pytest.raises(ArtifactError, match=r"model.*timeout.*taxonomy"):
+        validate_artifact(_reseal(_replace_failure(artifact, failure, replacement)))
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        FailureOrigin.TOOL_POLICY,
+        FailureOrigin.TOOL_INPUT,
+        FailureOrigin.TOOL_EXECUTION,
+        FailureOrigin.TOOL_OUTPUT,
+        FailureOrigin.CONFIGURATION,
+        FailureOrigin.ARTIFACT,
+        FailureOrigin.ORCHESTRATION,
+    ],
+)
+@pytest.mark.asyncio
+async def test_model_attempt_rejects_non_provider_failure_origins(
+    tmp_path: Path, origin: FailureOrigin
+) -> None:
+    artifact = await _model_retry_then_success_artifact(tmp_path)
+    failure = next(item for item in artifact.failures if item.code == "planner_busy")
+    forged = _replace_failure(artifact, failure, failure.model_copy(update={"origin": origin}))
+
+    with pytest.raises(ArtifactError, match=r"model.*(taxonomy|provider|failure)"):
+        validate_artifact(_reseal(forged))
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [FailureOrigin.MODEL_PROVIDER, FailureOrigin.MODEL_OUTPUT],
+    ids=["case-07-model-provider-origin", "case-08-model-output-origin"],
+)
+@pytest.mark.asyncio
+async def test_tool_attempt_rejects_model_origins(tmp_path: Path, origin: FailureOrigin) -> None:
+    artifact = await _tool_retry_then_success_artifact(tmp_path)
+    failure = next(item for item in artifact.failures if item.code == "tool_transient")
+    forged = _replace_failure(artifact, failure, failure.model_copy(update={"origin": origin}))
+
+    with pytest.raises(ArtifactError, match=r"tool.*(taxonomy|execution|output|failure)"):
+        validate_artifact(_reseal(forged))
+
+
+@pytest.mark.asyncio
+async def test_tool_attempt_rejects_retryable_unexpected_exception_followed_by_success(
+    tmp_path: Path,
+) -> None:
+    artifact = await _tool_retry_then_success_artifact(tmp_path)
+    failure = next(item for item in artifact.failures if item.code == "tool_transient")
+    replacement = failure.model_copy(
+        update={
+            "code": "unexpected_invocation_error",
+            "origin": FailureOrigin.UNEXPECTED_INTERNAL,
+            "retryable": True,
+            "exception_type": "RuntimeError",
+        }
+    )
+
+    with pytest.raises(ArtifactError, match=r"tool.*unexpected.*(taxonomy|retry)"):
+        validate_artifact(_reseal(_replace_failure(artifact, failure, replacement)))
+
+
+@pytest.mark.asyncio
+async def test_reserved_tool_timeout_code_cannot_have_failed_outcome(tmp_path: Path) -> None:
+    artifact = await _tool_retry_then_success_artifact(tmp_path)
+    failure = next(item for item in artifact.failures if item.code == "tool_transient")
+    replacement = failure.model_copy(
+        update={"code": "tool_attempt_timeout", "exception_type": "TimeoutError"}
+    )
+
+    with pytest.raises(ArtifactError, match=r"tool.*timeout.*(outcome|taxonomy|reserved)"):
+        validate_artifact(_reseal(_replace_failure(artifact, failure, replacement)))
+
+
+@pytest.mark.asyncio
+async def test_timed_out_tool_attempt_requires_timeout_error_exception(tmp_path: Path) -> None:
+    artifact = await _tool_timeout_artifact(tmp_path)
+    failure = next(
+        item.failure for item in artifact.tool_results if item.outcome == AttemptOutcome.TIMED_OUT
+    )
+    assert failure is not None
+    replacement = failure.model_copy(update={"exception_type": "RuntimeError"})
+
+    with pytest.raises(ArtifactError, match=r"tool.*timeout.*taxonomy"):
+        validate_artifact(_reseal(_replace_failure(artifact, failure, replacement)))
+
+
+@pytest.mark.parametrize("origin", [FailureOrigin.TOOL_POLICY, FailureOrigin.TOOL_INPUT])
+@pytest.mark.asyncio
+async def test_tool_attempt_rejects_pre_invocation_origins(
+    tmp_path: Path, origin: FailureOrigin
+) -> None:
+    artifact = await _tool_retry_then_success_artifact(tmp_path)
+    failure = next(item for item in artifact.failures if item.code == "tool_transient")
+    forged = _replace_failure(artifact, failure, failure.model_copy(update={"origin": origin}))
+
+    with pytest.raises(ArtifactError, match=r"tool.*(taxonomy|execution|output|failure)"):
+        validate_artifact(_reseal(forged))
+
+
+@pytest.mark.asyncio
+async def test_tool_output_failure_cannot_be_retryable_or_followed_by_another_attempt(
+    tmp_path: Path,
+) -> None:
+    artifact = await _tool_retry_then_success_artifact(tmp_path)
+    failure = next(item for item in artifact.failures if item.code == "tool_transient")
+    replacement = failure.model_copy(
+        update={
+            "code": "tool_output_invalid",
+            "origin": FailureOrigin.TOOL_OUTPUT,
+            "exception_type": "ToolOutputError",
+        }
+    )
+
+    with pytest.raises(ArtifactError, match=r"tool.*output.*(nonretryable|terminal|taxonomy)"):
+        validate_artifact(_reseal(_replace_failure(artifact, failure, replacement)))
+
+
+@pytest.mark.asyncio
+async def test_model_output_failure_cannot_predate_the_response_it_classifies(
+    tmp_path: Path,
+) -> None:
+    script = success_script()
+    script["responses"]["supervisor_plan"] = [{"kind": "success", "raw_json": "{"}]
+    artifact = await execute_loaded(
+        make_loaded(tmp_path, script=script), output_path=tmp_path / "malformed.json"
+    )
+    terminal = next(
+        item for item in artifact.model_attempts if item.logical_turn_id == "turn-supervisor-plan"
+    )
+    failure = next(item for item in artifact.failures if item.code == "malformed_model_json")
+    assert artifact.started_at < terminal.completed_at
+    replacement = failure.model_copy(update={"timestamp": artifact.started_at})
+
+    with pytest.raises(ArtifactError, match=r"model-output failure.*provider.*completion"):
+        validate_artifact(_reseal(_replace_failure(artifact, failure, replacement)))
+
+
+@pytest.mark.parametrize(
+    ("turn", "lifecycle_event"),
+    [
+        ("turn-supervisor-plan", "supervisor_planning_start"),
+        ("turn-order-worker", "worker_start"),
+        ("turn-supervisor-finalize", "supervisor_finalization_start"),
+    ],
+    ids=["case-15-planner", "case-16-worker", "case-17-finalizer"],
+)
+@pytest.mark.asyncio
+async def test_model_request_cannot_predate_its_lifecycle_start(
+    tmp_path: Path,
+    turn: str,
+    lifecycle_event: str,
+) -> None:
+    artifact = await _success(tmp_path)
+    requests = list(artifact.model_requests)
+    index = next(index for index, item in enumerate(requests) if item.logical_turn_id == turn)
+    lifecycle = next(
+        item
+        for item in artifact.events
+        if item.event_type == lifecycle_event
+        and (
+            lifecycle_event != "worker_start"
+            or item.source_component == requests[index].source_component
+        )
+    )
+    run_start = next(item for item in artifact.events if item.event_type == "run_start")
+    assert run_start.timestamp < lifecycle.timestamp
+    requests[index] = requests[index].model_copy(update={"created_at": run_start.timestamp})
+
+    with pytest.raises(ArtifactError, match=r"model request.*lifecycle.*start"):
+        validate_artifact(_reseal(artifact.model_copy(update={"model_requests": requests})))
+
+
+@pytest.mark.asyncio
+async def test_success_path_retains_exact_stage_one_attempt_shape(tmp_path: Path) -> None:
+    artifact = await _success(tmp_path)
+
+    assert artifact.status == RunStatus.SUCCEEDED
+    assert len(artifact.model_requests) == 4
+    assert len(artifact.model_attempts) == 4
+    assert all(item.outcome == AttemptOutcome.SUCCEEDED for item in artifact.model_attempts)
+    assert len(artifact.tool_results) == 2
+    assert all(item.outcome == AttemptOutcome.SUCCEEDED for item in artifact.tool_results)
+    assert artifact.failures == []
+    assert artifact.accounting.cost_usd == 0.0
+    assert artifact.final_decision == EXPECTED_DECISION
+
+
 @pytest.mark.asyncio
 async def test_resealed_nonretryable_model_attempt_cannot_be_followed_by_success(
     tmp_path: Path,
@@ -841,6 +1148,115 @@ async def _cancel_and_read(
     artifact = read_artifact(destination)
     validate_artifact(artifact)
     return artifact, caught.value
+
+
+def _assert_startup_cancellation_shape(artifact: RunArtifact, *, planning_start_count: int) -> None:
+    assert artifact.status == RunStatus.CANCELLED
+    assert len([item for item in artifact.events if item.event_type == "run_start"]) == 1
+    planning_transitions = [
+        item
+        for item in artifact.events
+        if item.event_type == "state_transition" and item.phase == RuntimePhase.PLANNING
+    ]
+    assert len(planning_transitions) == 1
+    assert (
+        len([item for item in artifact.events if item.event_type == "supervisor_planning_start"])
+        == planning_start_count
+    )
+    assert artifact.model_requests == []
+    assert artifact.model_attempts == []
+    assert artifact.tool_calls == []
+    assert artifact.tool_results == []
+    assert artifact.final_state.plan is None
+    assert artifact.final_state.worker_results == []
+    assert artifact.final_decision is None
+    assert any(item.code == "run_cancelled" for item in artifact.failures)
+    assert len([item for item in artifact.events if item.event_type == "run_cancellation"]) == 1
+
+
+@pytest.mark.parametrize(
+    "cancel_point",
+    ["run_start", "planning_transition"],
+    ids=["case-18-run-start-commit", "case-19-planning-transition-commit"],
+)
+@pytest.mark.asyncio
+async def test_startup_commit_cancellation_persists_truthful_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_point: str,
+) -> None:
+    gate = _CancellationGate()
+    original = EventRecorder.record
+
+    async def blocked_record(
+        self: EventRecorder,
+        event_type: str,
+        **kwargs: Any,
+    ) -> AgentEvent:
+        is_target = event_type == "run_start" or (
+            event_type == "state_transition" and kwargs.get("phase") == RuntimePhase.PLANNING
+        )
+        expected = (
+            event_type == "run_start"
+            if cancel_point == "run_start"
+            else (event_type == "state_transition" and kwargs.get("phase") == RuntimePhase.PLANNING)
+        )
+        if is_target and expected:
+            await gate.pause_once()
+        return await original(self, event_type, **kwargs)
+
+    monkeypatch.setattr(EventRecorder, "record", blocked_record)
+    destination = tmp_path / f"cancelled-{cancel_point}.json"
+    task = asyncio.create_task(execute_loaded(make_loaded(tmp_path), output_path=destination))
+    artifact, _ = await _cancel_and_read(task, gate, destination)
+
+    _assert_startup_cancellation_shape(artifact, planning_start_count=0)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_startup_before_graph_planning_persists_truthful_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = _CancellationGate()
+
+    class BlockedBeforePlanningGraph:
+        async def ainvoke(self, state: Any, *, context: Any) -> Any:
+            del context
+            await gate.pause_once()
+            return state
+
+    monkeypatch.setattr(runtime_module, "build_graph", BlockedBeforePlanningGraph)
+    destination = tmp_path / "cancelled-before-planning.json"
+    task = asyncio.create_task(execute_loaded(make_loaded(tmp_path), output_path=destination))
+    artifact, _ = await _cancel_and_read(task, gate, destination)
+
+    _assert_startup_cancellation_shape(artifact, planning_start_count=0)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_planning_start_commit_persists_truthful_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = _CancellationGate()
+    original = EventRecorder.record
+
+    async def blocked_record(
+        self: EventRecorder,
+        event_type: str,
+        **kwargs: Any,
+    ) -> AgentEvent:
+        if event_type == "supervisor_planning_start":
+            await gate.pause_once()
+        return await original(self, event_type, **kwargs)
+
+    monkeypatch.setattr(EventRecorder, "record", blocked_record)
+    destination = tmp_path / "cancelled-planning-start.json"
+    task = asyncio.create_task(execute_loaded(make_loaded(tmp_path), output_path=destination))
+    artifact, _ = await _cancel_and_read(task, gate, destination)
+
+    _assert_startup_cancellation_shape(artifact, planning_start_count=1)
 
 
 @pytest.mark.asyncio
