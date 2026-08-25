@@ -1,5 +1,11 @@
 # Engineering log
 
+## 2026-08-25 — Final Stage 1 taxonomy and startup-cancellation micro-patch
+
+Package version advances to `0.3.2`; durable artifact schema `0.3.0`, all historical artifact schemas, and task/config/model/order/policy fixture schemas remain byte-for-byte unchanged. Artifact validation now mirrors the fixture runtime's exact model/tool attempt origin, outcome, exception, timeout, cancellation, unexpected-exception, typed-transient, and retry boundaries. Tool-policy/input and model-output failures cannot masquerade as nested attempts; tool-output failures are nonretryable and terminal. Deterministic JSON parse, public-schema, and semantic-contract failures must follow the successful provider response they classify, and each request must follow its planning, worker, or finalization lifecycle start while still preceding its first provider attempt.
+
+Run start plus the initial planning transition now form one bounded cancellation-safe startup commit inside the main catch-and-persist boundary. Planning-lifecycle start is protected separately. Cancellation during either startup mutation, between startup and graph planning, or during planning-start recording persists truthful cancelled evidence and re-raises the original `CancelledError`; the no-planning-start shape is accepted only when no request or planning work exists. No durable field, checkpointer, process resume, human interrupt, MCP, sandbox, RAG, observability backend, real provider, benchmark, repeated sampling, replay, deployment, publication, or cross-repository change was added.
+
 ## 2026-08-25 — Final Stage 1 runtime-invariant closure
 
 Package version advances to `0.3.1` while durable artifact schema `0.3.0`, historical artifact schemas, and task/config/model/order/policy fixture schemas remain unchanged. One shared validator now applies the effective model or tool retry policy to each request/call group, including maximum and contiguous attempts, terminal success, retryability, exact timeout and invocation-cancellation taxonomy, and valid failed/cancelled early stops. Failed response paths deterministically reconcile actual JSON parse, strict public schema, and Stage 1 semantic results to their recorded failure code and origin; a cancelled run may stop at an acceptance boundary without inventing an output failure.

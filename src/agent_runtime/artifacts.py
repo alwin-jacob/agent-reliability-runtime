@@ -577,27 +577,34 @@ def _validate_effective_retry_group(
 
     for index, attempt in enumerate(attempts):
         failure = attempt.failure
-        if failure is not None and (
-            failure.code == "invocation_cancelled"
-            or failure.origin == FailureOrigin.CANCELLATION
-            or failure.exception_type == "CancelledError"
+        if (
+            failure is not None
+            and (
+                failure.code == "invocation_cancelled"
+                or failure.origin == FailureOrigin.CANCELLATION
+                or failure.exception_type == "CancelledError"
+            )
+            and attempt.outcome != AttemptOutcome.FAILED
         ):
-            if (
-                failure.code != "invocation_cancelled"
-                or failure.origin != FailureOrigin.CANCELLATION
-                or failure.retryable
-                or attempt.outcome != AttemptOutcome.FAILED
-                or index != len(attempts) - 1
-            ):
-                raise ArtifactError(f"{label} invocation cancellation evidence is inconsistent")
+            raise ArtifactError(f"{label} invocation cancellation evidence is inconsistent")
         if attempt.outcome == AttemptOutcome.TIMED_OUT:
             if (
                 failure is None
                 or failure.code != timeout_code
                 or failure.origin != timeout_origin
                 or not failure.retryable
+                or failure.exception_type != "TimeoutError"
             ):
                 raise ArtifactError(f"{label} timeout has inconsistent runtime taxonomy")
+        elif failure is not None:
+            _validate_failed_attempt_taxonomy(
+                failure,
+                attempt.outcome,
+                index=index,
+                attempt_count=len(attempts),
+                label=label,
+                timeout_code=timeout_code,
+            )
         if index < len(attempts) - 1:
             if failure is None or not failure.retryable:
                 raise ArtifactError(f"nonterminal {label} attempt must have a retryable failure")
@@ -613,6 +620,82 @@ def _validate_effective_retry_group(
         raise ArtifactError(
             f"failed run stopped on retryable {label} failure before configured maximum"
         )
+
+
+def _validate_failed_attempt_taxonomy(
+    failure: FailureRecord,
+    outcome: AttemptOutcome,
+    *,
+    index: int,
+    attempt_count: int,
+    label: str,
+    timeout_code: str,
+) -> None:
+    """Mirror the exact failure boundaries reachable inside invoke_with_policy()."""
+
+    is_terminal = index == attempt_count - 1
+    if outcome != AttemptOutcome.FAILED:
+        raise ArtifactError(f"{label} failure has an invalid attempt outcome")
+    if failure.code == timeout_code:
+        raise ArtifactError(f"{label} timeout code is reserved for the timed_out outcome")
+
+    has_cancellation_marker = (
+        failure.code == "invocation_cancelled"
+        or failure.origin == FailureOrigin.CANCELLATION
+        or failure.exception_type == "CancelledError"
+    )
+    if has_cancellation_marker:
+        if (
+            failure.code != "invocation_cancelled"
+            or failure.origin != FailureOrigin.CANCELLATION
+            or failure.retryable
+            or failure.exception_type != "CancelledError"
+            or not is_terminal
+        ):
+            raise ArtifactError(f"{label} invocation cancellation evidence is inconsistent")
+        return
+
+    if failure.code == "unexpected_invocation_error":
+        if (
+            failure.origin != FailureOrigin.UNEXPECTED_INTERNAL
+            or failure.retryable
+            or not is_terminal
+        ):
+            raise ArtifactError(
+                f"{label} unexpected invocation error has inconsistent retry taxonomy"
+            )
+        return
+
+    if failure.origin == FailureOrigin.UNEXPECTED_INTERNAL:
+        if (
+            failure.code != "transient_infrastructure"
+            or failure.exception_type != "TransientInfrastructureError"
+            or not failure.retryable
+        ):
+            raise ArtifactError(
+                f"{label} unexpected-internal failure is not the typed transient taxonomy"
+            )
+        return
+
+    if label == "model":
+        if (
+            failure.origin != FailureOrigin.MODEL_PROVIDER
+            or failure.exception_type != "ProviderError"
+        ):
+            raise ArtifactError("model failure must use the provider-error runtime taxonomy")
+        return
+
+    if failure.origin == FailureOrigin.TOOL_EXECUTION:
+        if failure.exception_type != "ToolExecutionError":
+            raise ArtifactError("tool-execution failure has inconsistent runtime taxonomy")
+        return
+    if failure.origin == FailureOrigin.TOOL_OUTPUT:
+        if failure.exception_type != "ToolOutputError" or failure.retryable or not is_terminal:
+            raise ArtifactError(
+                "tool-output failure must be nonretryable and terminal in runtime taxonomy"
+            )
+        return
+    raise ArtifactError("tool failure must use tool-execution or tool-output runtime taxonomy")
 
 
 def _validate_attempt_event(
@@ -806,19 +889,19 @@ def _validate_failed_response_causality(
         try:
             raw_value = json.loads(raw_json)
         except json.JSONDecodeError:
-            _require_output_failure(artifact, request, "malformed_model_json")
+            _require_output_failure(artifact, request, terminal, "malformed_model_json")
             continue
 
         if turn == "turn-supervisor-plan":
             try:
                 parsed_plan = SupervisorPlan.model_validate(raw_value)
             except (ValidationError, ValueError):
-                _require_output_failure(artifact, request, "model_output_schema_invalid")
+                _require_output_failure(artifact, request, terminal, "model_output_schema_invalid")
                 continue
             try:
                 validate_stage_one_plan(parsed_plan)
             except SemanticValidationError as error:
-                _require_output_failure(artifact, request, error.code)
+                _require_output_failure(artifact, request, terminal, error.code)
                 continue
             _reject_contradictory_output_failures(artifact, request)
             if artifact.final_state.plan is None:
@@ -832,7 +915,7 @@ def _validate_failed_response_causality(
             try:
                 parsed_call = WorkerToolRequest.model_validate(raw_value)
             except (ValidationError, ValueError):
-                _require_output_failure(artifact, request, "model_output_schema_invalid")
+                _require_output_failure(artifact, request, terminal, "model_output_schema_invalid")
                 continue
             try:
                 validate_worker_tool_request(
@@ -842,7 +925,7 @@ def _validate_failed_response_causality(
                     parsed_call.arguments,
                 )
             except SemanticValidationError as error:
-                _require_output_failure(artifact, request, error.code)
+                _require_output_failure(artifact, request, terminal, error.code)
                 continue
             _reject_contradictory_output_failures(artifact, request)
             calls = calls_by_worker.get(worker_id, [])
@@ -861,7 +944,7 @@ def _validate_failed_response_causality(
             try:
                 parsed_decision = FinalDecision.model_validate(raw_value)
             except (ValidationError, ValueError):
-                _require_output_failure(artifact, request, "model_output_schema_invalid")
+                _require_output_failure(artifact, request, terminal, "model_output_schema_invalid")
                 continue
             try:
                 validate_successful_decision(
@@ -870,7 +953,7 @@ def _validate_failed_response_causality(
                     parsed_decision,
                 )
             except SemanticValidationError as error:
-                _require_output_failure(artifact, request, error.code)
+                _require_output_failure(artifact, request, terminal, error.code)
                 continue
             _reject_contradictory_output_failures(artifact, request)
             if artifact.final_decision is None:
@@ -900,6 +983,7 @@ def _output_failures_for_request(
 def _require_output_failure(
     artifact: RunArtifact,
     request: ModelRequestRecord,
+    terminal: ModelAttempt,
     expected_code: str,
 ) -> None:
     failures = _output_failures_for_request(artifact, request)
@@ -909,6 +993,13 @@ def _require_output_failure(
         if failure.code == expected_code
         and failure.origin == FailureOrigin.MODEL_OUTPUT
         and not failure.retryable
+        and failure.phase == request.phase
+        and failure.source_component == request.source_component
+        and failure.span_id == terminal.parent_span_id
+        and failure.attempt is None
+        and failure.model_attempt_id is None
+        and failure.tool_call_id is None
+        and failure.exception_type == "ModelOutputError"
     ]
     if artifact.status == RunStatus.CANCELLED and not failures:
         return
@@ -917,6 +1008,41 @@ def _require_output_failure(
             "terminal model-output failure code is not causally linked to parse result "
             f"{expected_code}"
         )
+    failure = matching[0]
+    if _parse_utc_timestamp(
+        failure.timestamp, "model-output failure timestamp"
+    ) < _parse_utc_timestamp(terminal.completed_at, "terminal provider completion"):
+        raise ArtifactError(
+            "model-output failure timestamp must follow its provider attempt completion"
+        )
+
+    provider_terminal = next(
+        (
+            event
+            for event in artifact.events
+            if event.span_id == terminal.attempt_id and event.event_type == "model_attempt_end"
+        ),
+        None,
+    )
+    failure_events = [
+        event for event in artifact.events if event.payload.get("failure_id") == failure.failure_id
+    ]
+    run_terminal = next(
+        (
+            event
+            for event in artifact.events
+            if event.event_type in {"run_success", "run_failure", "run_cancellation"}
+        ),
+        None,
+    )
+    if (
+        provider_terminal is None
+        or not failure_events
+        or run_terminal is None
+        or any(event.sequence <= provider_terminal.sequence for event in failure_events)
+        or run_terminal.sequence <= provider_terminal.sequence
+    ):
+        raise ArtifactError("model-output failure events must follow the provider terminal event")
 
 
 def _reject_contradictory_output_failures(
@@ -1311,9 +1437,12 @@ def _validate_span_identities(artifact: RunArtifact) -> None:
         event.event_type == "state_transition" and event.phase == RuntimePhase.FINALIZING
         for event in artifact.events
     )
+    cancelled_before_planning = _is_cancelled_before_planning_lifecycle(artifact)
 
-    if len(run_spans) != 1 or len(planning_spans) != 1:
-        raise ArtifactError("run_start and planning lifecycle spans must each have one identity")
+    if len(run_spans) != 1 or len(planning_spans) != int(not cancelled_before_planning):
+        raise ArtifactError(
+            "run_start and reached planning lifecycle spans must each have one identity"
+        )
     if len(worker_spans) != len(worker_starts):
         raise ArtifactError("worker lifecycle spans must be distinct")
     if len(finalization_spans) != int(reached_finalization):
@@ -1334,6 +1463,36 @@ def _validate_span_identities(artifact: RunArtifact) -> None:
         for right_name in names[index + 1 :]:
             if categories[left_name] & categories[right_name]:
                 raise ArtifactError(f"span identity collision between {left_name} and {right_name}")
+
+
+def _is_cancelled_before_planning_lifecycle(artifact: RunArtifact) -> bool:
+    """Recognize only the truthful no-planning-work startup cancellation shape."""
+
+    event_types = [event.event_type for event in artifact.events]
+    transitions = [
+        event.phase for event in artifact.events if event.event_type == "state_transition"
+    ]
+    return (
+        artifact.status == RunStatus.CANCELLED
+        and event_types
+        == [
+            "run_start",
+            "state_transition",
+            "state_transition",
+            "run_cancellation",
+            "artifact_persistence_start",
+        ]
+        and transitions == [RuntimePhase.PLANNING, RuntimePhase.CANCELLED]
+        and artifact.model_requests == []
+        and artifact.model_attempts == []
+        and artifact.tool_calls == []
+        and artifact.tool_results == []
+        and artifact.final_state.plan is None
+        and artifact.final_state.worker_results == []
+        and artifact.final_decision is None
+        and len(artifact.failures) == 1
+        and artifact.failures[0].code == "run_cancelled"
+    )
 
 
 def _require_unique(values: Any, label: str) -> None:
@@ -1547,21 +1706,24 @@ def _validate_required_events(artifact: RunArtifact) -> None:
         raise ArtifactError("artifact transition chain does not reach the final state")
 
     planning_starts = events_by_type["supervisor_planning_start"]
-    if (
-        len(planning_starts) != 1
-        or planning_starts[0].source_component != "supervisor"
-        or planning_starts[0].phase != RuntimePhase.PLANNING
-    ):
-        raise ArtifactError("artifact requires exactly one supervisor planning start event")
-    planning_start = planning_starts[0]
-    if planning_start.parent_span_id != run_start.span_id or planning_start.payload != {}:
-        raise ArtifactError("planning-start parent span is invalid")
     planning_transitions = [item for item in transitions if item.phase == RuntimePhase.PLANNING]
-    if (
-        len(planning_transitions) != 1
-        or planning_transitions[0].sequence >= planning_start.sequence
-    ):
-        raise ArtifactError("planning start must follow the accepted planning transition")
+    cancelled_before_planning = _is_cancelled_before_planning_lifecycle(artifact)
+    planning_start: AgentEvent | None = None
+    if not cancelled_before_planning:
+        if (
+            len(planning_starts) != 1
+            or planning_starts[0].source_component != "supervisor"
+            or planning_starts[0].phase != RuntimePhase.PLANNING
+        ):
+            raise ArtifactError("artifact requires exactly one supervisor planning start event")
+        planning_start = planning_starts[0]
+        if planning_start.parent_span_id != run_start.span_id or planning_start.payload != {}:
+            raise ArtifactError("planning-start parent span is invalid")
+        if (
+            len(planning_transitions) != 1
+            or planning_transitions[0].sequence >= planning_start.sequence
+        ):
+            raise ArtifactError("planning start must follow the accepted planning transition")
 
     requests_by_turn = {item.logical_turn_id: item for item in artifact.model_requests}
     attempts_by_request: dict[str, list[ModelAttempt]] = defaultdict(list)
@@ -1569,6 +1731,12 @@ def _validate_required_events(artifact: RunArtifact) -> None:
         attempts_by_request[attempt.request_id].append(attempt)
     planner_request = requests_by_turn.get("turn-supervisor-plan")
     if planner_request is not None:
+        if planning_start is None:
+            raise ArtifactError("planner request requires a planning lifecycle start")
+        if _parse_utc_timestamp(
+            planner_request.created_at, "planner request created_at"
+        ) < _parse_utc_timestamp(planning_start.timestamp, "planning lifecycle start"):
+            raise ArtifactError("model request must not predate its lifecycle start")
         for attempt in attempts_by_request.get(planner_request.request_id, []):
             if attempt.parent_span_id != planning_start.span_id:
                 raise ArtifactError("planner attempt has the wrong planning parent span")
@@ -1581,7 +1749,7 @@ def _validate_required_events(artifact: RunArtifact) -> None:
     ):
         raise ArtifactError("artifact contains duplicate supervisor planning end events")
     if planning_ends:
-        if planner_request is None:
+        if planner_request is None or planning_start is None:
             raise ArtifactError("planning end exists without a planner request")
         planner_terminal = _terminal_event_for_request(
             artifact, planner_request, attempts_by_request
@@ -1598,7 +1766,7 @@ def _validate_required_events(artifact: RunArtifact) -> None:
             raise ArtifactError("planning end is not caused by the planner terminal response")
 
     if plan is not None:
-        if len(planning_ends) != 1:
+        if len(planning_ends) != 1 or planning_start is None:
             raise ArtifactError("accepted plan requires exactly one supervisor planning end event")
         execution_transitions = [
             item for item in transitions if item.phase == RuntimePhase.EXECUTING_WORKERS
@@ -1655,6 +1823,10 @@ def _validate_required_events(artifact: RunArtifact) -> None:
         starts = matching("worker_start", worker_id, RuntimePhase.EXECUTING_WORKERS)
         if len(starts) != 1:
             raise ArtifactError("worker request requires exactly one worker-start lifecycle event")
+        if _parse_utc_timestamp(
+            request.created_at, "worker request created_at"
+        ) < _parse_utc_timestamp(starts[0].timestamp, "worker lifecycle start"):
+            raise ArtifactError("model request must not predate its lifecycle start")
         if any(
             item.parent_span_id != starts[0].span_id
             for item in attempts_by_request.get(request.request_id, [])
@@ -1784,6 +1956,10 @@ def _validate_required_events(artifact: RunArtifact) -> None:
     if finalizer_request is not None:
         if len(final_starts) != 1:
             raise ArtifactError("finalizer request requires one finalization-start event")
+        if _parse_utc_timestamp(
+            finalizer_request.created_at, "finalizer request created_at"
+        ) < _parse_utc_timestamp(final_starts[0].timestamp, "finalization lifecycle start"):
+            raise ArtifactError("model request must not predate its lifecycle start")
         if any(
             item.parent_span_id != final_starts[0].span_id
             for item in attempts_by_request.get(finalizer_request.request_id, [])
@@ -1851,6 +2027,18 @@ def _validate_required_events(artifact: RunArtifact) -> None:
             "failure_code": failure.code,
         }
         if artifact.status == RunStatus.CANCELLED:
+            if (
+                failure.code != "run_cancelled"
+                or failure.origin != FailureOrigin.CANCELLATION
+                or failure.retryable
+                or failure.exception_type != "CancelledError"
+                or failure.source_component != "runtime"
+                or failure.attempt is not None
+                or failure.model_attempt_id is not None
+                or failure.tool_call_id is not None
+                or failure.span_id != run_start.span_id
+            ):
+                raise ArtifactError("run cancellation failure taxonomy is inconsistent")
             if run_terminal.payload != {
                 "active_workers_after_cleanup": 0,
                 **expected_failure_payload,

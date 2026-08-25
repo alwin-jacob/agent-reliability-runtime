@@ -8,7 +8,7 @@ This repository owns local agent-runtime execution: deterministic orchestration,
 
 The currently implemented target is Stage 0 repository foundation plus the deterministic Stage 1 supervisor/two-worker vertical slice. Stage 2 features must remain documented as planned until implemented and verified.
 
-The package version is `0.3.1`. The current durable artifact schema remains `0.3.0`, and task, config, model-fixture, order-fixture, and policy-fixture schemas remain `0.2.0`. This closure adds stricter validation and cancellation-consistent in-memory commits without changing the artifact shape or adding durable checkpointing.
+The package version is `0.3.2`. The current durable artifact schema remains `0.3.0`, and task, config, model-fixture, order-fixture, and policy-fixture schemas remain `0.2.0`. This closure validates exact attempt taxonomy and causal lifecycle time, and makes startup/planning entry cancellation-consistent without changing the artifact shape or adding durable checkpointing.
 
 ## Required commands
 

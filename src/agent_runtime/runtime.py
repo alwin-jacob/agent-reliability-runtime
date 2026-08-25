@@ -128,14 +128,6 @@ async def execute_loaded(
         event_recorder=recorder,
         services=services,
     )
-    await recorder.record(
-        "run_start",
-        source_component="runtime",
-        phase=RuntimePhase.INITIALIZED,
-        span_id=run_span_id,
-        payload={"run_id": run_id, "task_id": loaded.task.task_id},
-    )
-    await services.phase.transition(RuntimePhase.PLANNING, source_component="runtime")
     graph_state: GraphState = {
         "task": loaded.task,
         "phase": RuntimePhase.PLANNING,
@@ -144,6 +136,18 @@ async def execute_loaded(
         "final_decision": None,
     }
     try:
+
+        async def commit_startup() -> None:
+            await recorder.record(
+                "run_start",
+                source_component="runtime",
+                phase=RuntimePhase.INITIALIZED,
+                span_id=run_span_id,
+                payload={"run_id": run_id, "task_id": loaded.task.task_id},
+            )
+            await services.phase.transition(RuntimePhase.PLANNING, source_component="runtime")
+
+        await complete_cancellation_safe(commit_startup)
         graph = build_graph()
         raw_result = await graph.ainvoke(graph_state, context=context)
         graph_state = cast(GraphState, raw_result)
