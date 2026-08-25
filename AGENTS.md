@@ -8,6 +8,8 @@ This repository owns local agent-runtime execution: deterministic orchestration,
 
 The currently implemented target is Stage 0 repository foundation plus the deterministic Stage 1 supervisor/two-worker vertical slice. Stage 2 features must remain documented as planned until implemented and verified.
 
+The package version is `0.3.1`. The current durable artifact schema remains `0.3.0`, and task, config, model-fixture, order-fixture, and policy-fixture schemas remain `0.2.0`. This closure adds stricter validation and cancellation-consistent in-memory commits without changing the artifact shape or adding durable checkpointing.
+
 ## Required commands
 
 Use the repository-local locked environment. Before a local commit, run the checks relevant to that commit; before reporting completion, run all of these commands:
@@ -42,6 +44,8 @@ Tests, schema synchronization, deterministic example generation, artifact valida
 ## Evidence and claim rules
 
 - Preserve typed failures, every durable model request, every model/tool attempt, state transitions, event sequence, accounting, provenance, and content integrity in versioned artifacts.
+- Enforce effective retry policy, deterministic response-to-failure causality, fixture-response semantics, strict validation of every successful partial tool output, timestamp/event/span consistency, and cancellation-consistent in-memory evidence units.
+- Treat unkeyed hashes as modification detectors, not signatures. Source commit, lock digest, and other provenance require matching repository context before making authenticity claims.
 - Do not report unsupported measurements or resume claims. In particular, do not claim benchmark percentages, repeated-sampling reliability, judge calibration, annotator consensus, Cohen's kappa, significance, deployment, or unimplemented infrastructure.
 - README and claim/evidence documentation must clearly separate what is implemented now from what is planned. Planned work must not appear as an empty module, working feature, or completed checklist item.
 - Do not mark checkpointing, process resume, human approval/interrupts, MCP, sandboxing/Docker, network tools, RAG, Langfuse/LangSmith observability, real-model providers, provider fallback, or benchmark programs as implemented.

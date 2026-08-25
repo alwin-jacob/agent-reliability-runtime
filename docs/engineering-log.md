@@ -1,5 +1,15 @@
 # Engineering log
 
+## 2026-08-25 — Final Stage 1 runtime-invariant closure
+
+Package version advances to `0.3.1` while durable artifact schema `0.3.0`, historical artifact schemas, and task/config/model/order/policy fixture schemas remain unchanged. One shared validator now applies the effective model or tool retry policy to each request/call group, including maximum and contiguous attempts, terminal success, retryability, exact timeout and invocation-cancellation taxonomy, and valid failed/cancelled early stops. Failed response paths deterministically reconcile actual JSON parse, strict public schema, and Stage 1 semantic results to their recorded failure code and origin; a cancelled run may stop at an acceptance boundary without inventing an output failure.
+
+Every successful order or policy attempt is strictly revalidated even in failed or cancelled artifacts, and its accepted worker output must equal the terminal successful output. Successful fixture responses require scripted finish, zero cost, synthetic-or-absent token attribution, request-matching success metadata, one consistent model ID, and exactly the model/orders/policies fixture digests. These are internal contract checks, not provider-authenticity evidence. The closed artifact-0.3.0 event vocabulary, inclusive run interval, record/event ordering, exact containing-failure timestamp, and category-distinct lifecycle/attempt spans are now validated. `duration_ms` remains a nonnegative independent monotonic measurement and is not equated with UTC timestamp subtraction.
+
+Bounded record/event/state acceptance units now defer outer cancellation until their in-memory evidence commit completes, then re-raise the original `CancelledError`. Active-phase cancellation still cleans up workers and persists a valid cancelled artifact. Once terminal success is committed, cancellation-safe assembly/writing persists success without adding cancellation evidence, while cancellation remains visible to the caller. Concurrency-probe entry bookkeeping rolls back if the probe itself is cancelled. This adds no durable checkpoint, restart/resume path, human interrupt, replay adapter, real provider, benchmark, repeated sampling, or other Stage 2 capability.
+
+Hashes remain modification detectors rather than signatures. Source commit, lock digest, and other provenance need matching repository context before they can support authenticity.
+
 ## 2026-08-25 — Stage 1 causal-trajectory closure
 
 Package and current run-artifact schema advance to `0.3.0`; artifact schemas `0.1.0` and `0.2.0` remain unchanged, and task/config/model/order/policy fixture schemas remain independently `0.2.0`. A neutral integrity module now supplies canonical JSON SHA-256. Every logical fixture-model turn persists one strict internal request before its first provider attempt, and every retry uses that same request. The request payload is complete for the fixture adapter, is scanned for private paths and secret-like values, and is not chain-of-thought. A later real-provider adapter may need a separate redacted wire-envelope record.

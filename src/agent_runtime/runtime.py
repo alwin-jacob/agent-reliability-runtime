@@ -35,6 +35,7 @@ from agent_runtime.errors import (
 )
 from agent_runtime.events import EventRecorder, isoformat_utc, utc_now
 from agent_runtime.integrity import sha256_bytes
+from agent_runtime.invocation import complete_cancellation_safe
 from agent_runtime.orchestration import (
     GraphState,
     RuntimeContext,
@@ -148,14 +149,43 @@ async def execute_loaded(
         graph_state = cast(GraphState, raw_result)
     except asyncio.CancelledError as cancellation:
         try:
-            await _persist_cancelled(
-                loaded=loaded,
-                services=services,
-                state=graph_state,
-                run_id=run_id,
-                started_at=started_at,
-                output_path=output_path,
-            )
+            if services.phase.current == RuntimePhase.SUCCEEDED:
+                await complete_cancellation_safe(
+                    lambda: _assemble_and_write(
+                        loaded=loaded,
+                        services=services,
+                        state=graph_state,
+                        run_id=run_id,
+                        started_at=started_at,
+                        output_path=output_path,
+                    )
+                )
+                cancellation.add_note(
+                    "run had already committed success; the successful artifact was "
+                    "persisted before cancellation propagated"
+                )
+            elif services.phase.current == RuntimePhase.FAILED:
+                await complete_cancellation_safe(
+                    lambda: _assemble_and_write(
+                        loaded=loaded,
+                        services=services,
+                        state=graph_state,
+                        run_id=run_id,
+                        started_at=started_at,
+                        output_path=output_path,
+                    )
+                )
+            else:
+                await complete_cancellation_safe(
+                    lambda: _persist_cancelled(
+                        loaded=loaded,
+                        services=services,
+                        state=graph_state,
+                        run_id=run_id,
+                        started_at=started_at,
+                        output_path=output_path,
+                    )
+                )
         except BaseException as persistence_error:
             cancellation.add_note(
                 "cancelled-artifact persistence failed: "
@@ -186,22 +216,24 @@ async def execute_loaded(
         )
         graph_state = {**graph_state, "phase": RuntimePhase.FAILED, "final_decision": None}
 
-    artifact = await _assemble_artifact(
-        loaded=loaded,
-        services=services,
-        state=graph_state,
-        run_id=run_id,
-        started_at=started_at,
-    )
-    write_artifact(artifact, output_path)
-    await recorder.record(
-        "artifact_persistence_result",
-        source_component="artifact",
-        phase=artifact.final_state.phase,
-        span_id=run_span_id,
-        payload={"succeeded": True},
-    )
-    return artifact
+    try:
+        return await complete_cancellation_safe(
+            lambda: _assemble_and_write(
+                loaded=loaded,
+                services=services,
+                state=graph_state,
+                run_id=run_id,
+                started_at=started_at,
+                output_path=output_path,
+            )
+        )
+    except asyncio.CancelledError as cancellation:
+        if services.phase.current == RuntimePhase.SUCCEEDED:
+            cancellation.add_note(
+                "run had already committed success; the successful artifact was "
+                "persisted before cancellation propagated"
+            )
+        raise
 
 
 async def _persist_cancelled(
@@ -248,14 +280,34 @@ async def _persist_cancelled(
         GraphState,
         {**state, "phase": RuntimePhase.CANCELLED},
     )
-    artifact = await _assemble_artifact(
+    await _assemble_and_write(
         loaded=loaded,
         services=services,
         state=cancelled_state,
         run_id=run_id,
         started_at=started_at,
+        output_path=output_path,
     )
-    await asyncio.shield(asyncio.to_thread(write_artifact, artifact, output_path))
+
+
+async def _assemble_and_write(
+    *,
+    loaded: LoadedInputs,
+    services: RuntimeServices,
+    state: GraphState,
+    run_id: str,
+    started_at: str,
+    output_path: Path,
+) -> RunArtifact:
+    artifact = await _assemble_artifact(
+        loaded=loaded,
+        services=services,
+        state=state,
+        run_id=run_id,
+        started_at=started_at,
+    )
+    await asyncio.to_thread(write_artifact, artifact, output_path)
+    return artifact
 
 
 async def _assemble_artifact(
