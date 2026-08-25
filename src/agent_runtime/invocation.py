@@ -50,13 +50,18 @@ async def complete_cancellation_safe(operation: Callable[[], Awaitable[T]]) -> T
         return await asyncio.shield(commit_task)
     except asyncio.CancelledError as cancellation:
         try:
-            await commit_task
+            while not commit_task.done():
+                try:
+                    await asyncio.shield(commit_task)
+                except asyncio.CancelledError:
+                    continue
+            commit_task.result()
         except BaseException as commit_error:
             cancellation.add_note(
                 "cancellation-safe commit failed: "
                 f"{type(commit_error).__name__}: {sanitize_message(commit_error)}"
             )
-        raise
+        raise cancellation
 
 
 async def invoke_with_policy(

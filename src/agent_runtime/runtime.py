@@ -148,49 +148,15 @@ async def execute_loaded(
         raw_result = await graph.ainvoke(graph_state, context=context)
         graph_state = cast(GraphState, raw_result)
     except asyncio.CancelledError as cancellation:
-        try:
-            if services.phase.current == RuntimePhase.SUCCEEDED:
-                await complete_cancellation_safe(
-                    lambda: _assemble_and_write(
-                        loaded=loaded,
-                        services=services,
-                        state=graph_state,
-                        run_id=run_id,
-                        started_at=started_at,
-                        output_path=output_path,
-                    )
-                )
-                cancellation.add_note(
-                    "run had already committed success; the successful artifact was "
-                    "persisted before cancellation propagated"
-                )
-            elif services.phase.current == RuntimePhase.FAILED:
-                await complete_cancellation_safe(
-                    lambda: _assemble_and_write(
-                        loaded=loaded,
-                        services=services,
-                        state=graph_state,
-                        run_id=run_id,
-                        started_at=started_at,
-                        output_path=output_path,
-                    )
-                )
-            else:
-                await complete_cancellation_safe(
-                    lambda: _persist_cancelled(
-                        loaded=loaded,
-                        services=services,
-                        state=graph_state,
-                        run_id=run_id,
-                        started_at=started_at,
-                        output_path=output_path,
-                    )
-                )
-        except BaseException as persistence_error:
-            cancellation.add_note(
-                "cancelled-artifact persistence failed: "
-                f"{type(persistence_error).__name__}: {sanitize_message(persistence_error)}"
-            )
+        await _persist_after_cancellation(
+            cancellation=cancellation,
+            loaded=loaded,
+            services=services,
+            state=graph_state,
+            run_id=run_id,
+            started_at=started_at,
+            output_path=output_path,
+        )
         raise
     except Exception as error:
         failure = unexpected_failure(
@@ -200,20 +166,37 @@ async def execute_loaded(
             timestamp=isoformat_utc(utc_now()),
             span_id=run_span_id,
         )
-        await services.add_failure(failure)
-        if services.phase.current in {
-            RuntimePhase.PLANNING,
-            RuntimePhase.EXECUTING_WORKERS,
-            RuntimePhase.FINALIZING,
-        }:
-            await services.phase.transition(RuntimePhase.FAILED, source_component="runtime")
-        await recorder.record(
-            "run_failure",
-            source_component="runtime",
-            phase=RuntimePhase.FAILED,
-            span_id=run_span_id,
-            payload={"failure_id": failure.failure_id, "failure_code": failure.code},
-        )
+
+        async def commit_unexpected_failure() -> None:
+            await services.add_failure(failure)
+            if services.phase.current in {
+                RuntimePhase.PLANNING,
+                RuntimePhase.EXECUTING_WORKERS,
+                RuntimePhase.FINALIZING,
+            }:
+                await services.phase.transition(RuntimePhase.FAILED, source_component="runtime")
+            await recorder.record(
+                "run_failure",
+                source_component="runtime",
+                phase=RuntimePhase.FAILED,
+                span_id=run_span_id,
+                payload={"failure_id": failure.failure_id, "failure_code": failure.code},
+            )
+
+        try:
+            await complete_cancellation_safe(commit_unexpected_failure)
+        except asyncio.CancelledError as cancellation:
+            graph_state = {**graph_state, "phase": RuntimePhase.FAILED, "final_decision": None}
+            await _persist_after_cancellation(
+                cancellation=cancellation,
+                loaded=loaded,
+                services=services,
+                state=graph_state,
+                run_id=run_id,
+                started_at=started_at,
+                output_path=output_path,
+            )
+            raise
         graph_state = {**graph_state, "phase": RuntimePhase.FAILED, "final_decision": None}
 
     try:
@@ -230,10 +213,54 @@ async def execute_loaded(
     except asyncio.CancelledError as cancellation:
         if services.phase.current == RuntimePhase.SUCCEEDED:
             cancellation.add_note(
-                "run had already committed success; the successful artifact was "
-                "persisted before cancellation propagated"
+                "run had already committed success before cancellation propagated"
             )
         raise
+
+
+async def _persist_after_cancellation(
+    *,
+    cancellation: asyncio.CancelledError,
+    loaded: LoadedInputs,
+    services: RuntimeServices,
+    state: GraphState,
+    run_id: str,
+    started_at: str,
+    output_path: Path,
+) -> None:
+    try:
+        if services.phase.current in {RuntimePhase.SUCCEEDED, RuntimePhase.FAILED}:
+            await complete_cancellation_safe(
+                lambda: _assemble_and_write(
+                    loaded=loaded,
+                    services=services,
+                    state=state,
+                    run_id=run_id,
+                    started_at=started_at,
+                    output_path=output_path,
+                )
+            )
+            if services.phase.current == RuntimePhase.SUCCEEDED:
+                cancellation.add_note(
+                    "run had already committed success; the successful artifact was "
+                    "persisted before cancellation propagated"
+                )
+        else:
+            await complete_cancellation_safe(
+                lambda: _persist_cancelled(
+                    loaded=loaded,
+                    services=services,
+                    state=state,
+                    run_id=run_id,
+                    started_at=started_at,
+                    output_path=output_path,
+                )
+            )
+    except BaseException as persistence_error:
+        cancellation.add_note(
+            "cancelled-artifact persistence failed: "
+            f"{type(persistence_error).__name__}: {sanitize_message(persistence_error)}"
+        )
 
 
 async def _persist_cancelled(
