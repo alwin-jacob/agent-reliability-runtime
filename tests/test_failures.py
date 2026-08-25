@@ -121,7 +121,9 @@ async def test_external_cancellation_cancels_active_workers_and_persists_evidenc
         await task
     artifact = read_artifact(destination)
     assert artifact.status == RunStatus.CANCELLED
-    assert loaded.provider.cancellation_observed is True
+    assert {item.failure.code for item in artifact.model_attempts if item.failure is not None} == {
+        "invocation_cancelled"
+    }
     cancellation_events = [
         item for item in artifact.events if item.event_type == "run_cancellation"
     ]

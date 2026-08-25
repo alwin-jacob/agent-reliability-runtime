@@ -1,5 +1,15 @@
 # Engineering log
 
+## 2026-08-25 — Stage 1 causal-trajectory closure
+
+Package and current run-artifact schema advance to `0.3.0`; artifact schemas `0.1.0` and `0.2.0` remain unchanged, and task/config/model/order/policy fixture schemas remain independently `0.2.0`. A neutral integrity module now supplies canonical JSON SHA-256. Every logical fixture-model turn persists one strict internal request before its first provider attempt, and every retry uses that same request. The request payload is complete for the fixture adapter, is scanned for private paths and secret-like values, and is not chain-of-thought. A later real-provider adapter may need a separate redacted wire-envelope record.
+
+Successful validation requires exactly planner, order-worker, policy-worker, and finalizer requests. Provider terminal responses must parse to the public strict plan/tool-request/decision types and equal the accepted downstream values. Model/tool attempt events reconcile exactly on identity, source, phase, parent, attempt, outcome, and failure reference. Stable failure IDs unify nested, top-level, and event evidence while retaining transient retry failures. Resealed adversarial tests cover missing/extra turns, response/action substitutions, orphan/duplicate events, context contradictions, dangling failures, and failed workers that contradict successful tools.
+
+A run-scoped accepted-state recorder outside LangGraph state captures the validated plan, every completed worker result, and any validated final decision. Cancellation after one worker completes persists that partial state and the blocked worker's cancellation attempt before re-raising the original `CancelledError`. `LoadedInputs` now retains immutable model-fixture bytes and constructs a fresh provider per execution; executing one loaded input twice reproduces the same retry pattern and semantic fingerprint. This is run isolation only, not repeated-sampling infrastructure or analysis.
+
+No checkpointing, process resume, human interrupts, MCP, sandboxing, RAG, external observability, real-provider execution, benchmark program, calibration, deployment, cross-repository change, or general trajectory replay command was added. Hashes remain modification detectors rather than signatures.
+
 ## 2026-08-25 — Stage 1 semantic-integrity correction
 
 A later source audit, distinct from the earlier implementation-agent review recorded below, found that Stage 1 order and policy evidence was not bound to one typed task context. Workers could select schema-valid but unrelated order/policy arguments, the finalizer checked only order ID and policy-window length, and the task had no fixed decision date. As a result, order/policy market, category, and purchase channel mismatches; unsupported item condition; arbitrary eligibility/code; and wall-clock-ambiguous time-window conclusions were possible.

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib.metadata
 import platform
 import subprocess
@@ -10,10 +9,7 @@ from pathlib import Path
 
 from agent_runtime import __version__
 from agent_runtime.domain import ContentDigests, Provenance
-
-
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+from agent_runtime.integrity import sha256_bytes
 
 
 def sha256_file(path: Path) -> str:

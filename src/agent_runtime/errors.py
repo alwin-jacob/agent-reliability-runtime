@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from uuid import uuid4
 
 from agent_runtime.domain import FailureOrigin, FailureRecord, RuntimePhase
+
+
+def new_failure_id() -> str:
+    return f"failure-{uuid4().hex}"
 
 
 def sanitize_message(value: object) -> str:
@@ -134,6 +139,7 @@ def failure_from_error(
     span_id: str | None = None,
 ) -> FailureRecord:
     return FailureRecord(
+        failure_id=new_failure_id(),
         code=error.code,
         origin=error.origin,
         phase=phase,
@@ -158,6 +164,7 @@ def unexpected_failure(
     span_id: str | None = None,
 ) -> FailureRecord:
     return FailureRecord(
+        failure_id=new_failure_id(),
         code="unexpected_internal_error",
         origin=FailureOrigin.UNEXPECTED_INTERNAL,
         phase=phase,

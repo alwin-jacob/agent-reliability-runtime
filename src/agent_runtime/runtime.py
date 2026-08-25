@@ -27,8 +27,14 @@ from agent_runtime.domain import (
     RuntimePhase,
     TaskSpec,
 )
-from agent_runtime.errors import ConfigurationError, sanitize_message, unexpected_failure
+from agent_runtime.errors import (
+    ConfigurationError,
+    new_failure_id,
+    sanitize_message,
+    unexpected_failure,
+)
 from agent_runtime.events import EventRecorder, isoformat_utc, utc_now
+from agent_runtime.integrity import sha256_bytes
 from agent_runtime.orchestration import (
     GraphState,
     RuntimeContext,
@@ -36,7 +42,7 @@ from agent_runtime.orchestration import (
     WorkerConcurrencyProbe,
     build_graph,
 )
-from agent_runtime.provenance import collect_provenance, sha256_bytes
+from agent_runtime.provenance import collect_provenance
 from agent_runtime.providers.fixture import FixtureModelProvider
 from agent_runtime.tools.base import RuntimeTool
 from agent_runtime.tools.registry import ToolRegistry
@@ -48,7 +54,7 @@ class LoadedInputs:
     task: TaskSpec
     config: RunConfig
     digests: ContentDigests
-    provider: FixtureModelProvider
+    model_fixture_bytes: bytes
     tools: ToolRegistry
     root: Path
 
@@ -78,7 +84,8 @@ def load_inputs(task_path: Path, config_path: Path, *, root: Path) -> LoadedInpu
         config_sha256=sha256_bytes(config_bytes),
         fixture_sha256={name: sha256_bytes(value) for name, value in sorted(fixture_bytes.items())},
     )
-    provider = FixtureModelProvider.from_file(fixture_paths["model"])
+    # Validate construction data while loading, but do not retain this stateful instance.
+    FixtureModelProvider.from_bytes(fixture_bytes["model"])
     tools = ToolRegistry(
         [
             cast(RuntimeTool, LookupOrderTool.from_file(fixture_paths["orders"])),
@@ -89,7 +96,7 @@ def load_inputs(task_path: Path, config_path: Path, *, root: Path) -> LoadedInpu
         task=task,
         config=config,
         digests=digests,
-        provider=provider,
+        model_fixture_bytes=fixture_bytes["model"],
         tools=tools,
         root=resolved_root,
     )
@@ -105,8 +112,9 @@ async def execute_loaded(
     run_span_id = f"span-{run_id}"
     started_at = isoformat_utc(utc_now())
     recorder = EventRecorder()
+    provider = FixtureModelProvider.from_bytes(loaded.model_fixture_bytes)
     services = RuntimeServices(
-        provider=loaded.provider,
+        provider=provider,
         tools=loaded.tools,
         recorder=recorder,
         config=loaded.config,
@@ -114,7 +122,7 @@ async def execute_loaded(
         concurrency_probe=concurrency_probe,
     )
     context = RuntimeContext(
-        provider=loaded.provider,
+        provider=provider,
         tool_registry=loaded.tools,
         event_recorder=recorder,
         services=services,
@@ -174,7 +182,7 @@ async def execute_loaded(
             source_component="runtime",
             phase=RuntimePhase.FAILED,
             span_id=run_span_id,
-            payload={"failure_code": failure.code},
+            payload={"failure_id": failure.failure_id, "failure_code": failure.code},
         )
         graph_state = {**graph_state, "phase": RuntimePhase.FAILED, "final_decision": None}
 
@@ -206,6 +214,7 @@ async def _persist_cancelled(
     output_path: Path,
 ) -> None:
     failure = FailureRecord(
+        failure_id=new_failure_id(),
         code="run_cancelled",
         origin=FailureOrigin.CANCELLATION,
         phase=services.phase.current,
@@ -229,11 +238,15 @@ async def _persist_cancelled(
         source_component="runtime",
         phase=RuntimePhase.CANCELLED,
         span_id=services.run_span_id,
-        payload={"active_workers_after_cleanup": services.active_workers},
+        payload={
+            "active_workers_after_cleanup": services.active_workers,
+            "failure_id": failure.failure_id,
+            "failure_code": failure.code,
+        },
     )
     cancelled_state = cast(
         GraphState,
-        {**state, "phase": RuntimePhase.CANCELLED, "final_decision": None},
+        {**state, "phase": RuntimePhase.CANCELLED},
     )
     artifact = await _assemble_artifact(
         loaded=loaded,
@@ -260,8 +273,8 @@ async def _assemble_artifact(
         span_id=services.run_span_id,
     )
     events = await services.recorder.snapshot()
-    model_attempts, tool_calls, tool_results, failures = await services.evidence()
-    accounting = build_accounting(model_attempts, tool_calls, tool_results)
+    model_requests, model_attempts, tool_calls, tool_results, failures = await services.evidence()
+    accounting = build_accounting(model_requests, model_attempts, tool_calls, tool_results)
     phase = services.phase.current
     status = {
         RuntimePhase.SUCCEEDED: RunStatus.SUCCEEDED,
@@ -270,12 +283,13 @@ async def _assemble_artifact(
     }.get(phase)
     if status is None:
         raise RuntimeError(f"cannot assemble artifact from active phase {phase.value}")
-    final_decision = state.get("final_decision")
+    accepted = await services.accepted_state.snapshot()
+    final_decision = accepted.final_decision
     final_state = AgentState(
         phase=phase,
         task=loaded.task,
-        plan=state.get("plan"),
-        worker_results=state.get("worker_results", []),
+        plan=accepted.plan,
+        worker_results=accepted.worker_results,
         final_decision=final_decision,
     )
     config_fingerprint = configuration_fingerprint(loaded.digests, loaded.task, loaded.config)
@@ -283,6 +297,7 @@ async def _assemble_artifact(
         digests=loaded.digests,
         final_decision=final_decision,
         events=events,
+        model_requests=model_requests,
         model_attempts=model_attempts,
         tool_calls=tool_calls,
         tool_results=tool_results,
@@ -299,6 +314,7 @@ async def _assemble_artifact(
         final_state=final_state,
         final_decision=final_decision,
         events=events,
+        model_requests=model_requests,
         model_attempts=model_attempts,
         tool_calls=tool_calls,
         tool_results=tool_results,

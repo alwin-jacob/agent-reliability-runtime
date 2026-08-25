@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from agent_runtime.domain import ToolDefinition
 from agent_runtime.errors import ConfigurationError, ToolExecutionError
+from agent_runtime.versions import OrderFixtureSchemaVersion, PolicyFixtureSchemaVersion
 
 
 class _ToolModel(BaseModel):
@@ -45,13 +46,13 @@ class LookupReturnPolicyOutput(_ToolModel):
 
 
 class _OrderFixture(_ToolModel):
-    schema_version: Literal["0.2.0"]
+    schema_version: OrderFixtureSchemaVersion
     delay_seconds: float = Field(default=0.0, ge=0, le=300)
     orders: list[LookupOrderOutput]
 
 
 class _PolicyFixture(_ToolModel):
-    schema_version: Literal["0.2.0"]
+    schema_version: PolicyFixtureSchemaVersion
     delay_seconds: float = Field(default=0.0, ge=0, le=300)
     policies: list[LookupReturnPolicyOutput]
 

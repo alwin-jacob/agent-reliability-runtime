@@ -20,9 +20,9 @@ uv run ruff format --check .
 uv run mypy src tests
 uv run pytest -q
 uv run python scripts/check_schema_sync.py
-rm -f /tmp/retail-return-v2.run.json
-uv run agent-runtime run --task examples/tasks/retail-return-v1.json --config examples/configs/deterministic-v1.json --output /tmp/retail-return-v2.run.json
-uv run agent-runtime validate-artifact /tmp/retail-return-v2.run.json
+rm -f /tmp/retail-return-v3.run.json
+uv run agent-runtime run --task examples/tasks/retail-return-v1.json --config examples/configs/deterministic-v1.json --output /tmp/retail-return-v3.run.json
+uv run agent-runtime validate-artifact /tmp/retail-return-v3.run.json
 uv run python scripts/verify_example.py
 git diff --check
 git status --short
@@ -41,7 +41,7 @@ Tests, schema synchronization, deterministic example generation, artifact valida
 
 ## Evidence and claim rules
 
-- Preserve typed failures, every model/tool attempt, state transitions, event sequence, accounting, provenance, and content integrity in versioned artifacts.
+- Preserve typed failures, every durable model request, every model/tool attempt, state transitions, event sequence, accounting, provenance, and content integrity in versioned artifacts.
 - Do not report unsupported measurements or resume claims. In particular, do not claim benchmark percentages, repeated-sampling reliability, judge calibration, annotator consensus, Cohen's kappa, significance, deployment, or unimplemented infrastructure.
 - README and claim/evidence documentation must clearly separate what is implemented now from what is planned. Planned work must not appear as an empty module, working feature, or completed checklist item.
 - Do not mark checkpointing, process resume, human approval/interrupts, MCP, sandboxing/Docker, network tools, RAG, Langfuse/LangSmith observability, real-model providers, provider fallback, or benchmark programs as implemented.

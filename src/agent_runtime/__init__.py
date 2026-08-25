@@ -1,5 +1,7 @@
 """Local deterministic agent reliability runtime."""
 
-__version__ = "0.2.0"
+from agent_runtime.versions import PACKAGE_VERSION
+
+__version__ = PACKAGE_VERSION
 
 __all__ = ["__version__"]
