@@ -32,6 +32,9 @@ packages = ["src/agent_runtime"]
 addopts = "--strict-config --strict-markers"
 asyncio_mode = "strict"
 testpaths = ["tests"]
+filterwarnings = [
+  "ignore:Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater:UserWarning:langchain_core.utils.pydantic",
+]
 
 [tool.ruff]
 target-version = "py311"
@@ -44,3 +47,8 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 python_version = "3.11"
 strict = true
 files = ["src", "tests"]
+
+# jsonschema does not publish inline typing or a version-matched stub package.
+[[tool.mypy.overrides]]
+module = ["jsonschema", "jsonschema.*"]
+ignore_missing_imports = true

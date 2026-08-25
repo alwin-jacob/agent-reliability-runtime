@@ -1,0 +1,32 @@
+{
+  "provider_id": "fixture-script-v1",
+  "responses": {
+    "supervisor_finalize": [
+      {
+        "kind": "success",
+        "raw_json": "{\"eligible\":true,\"decision_code\":\"RETURN_ELIGIBLE\",\"reason\":\"The unopened delivered household item is within the 30-day US online return window and has no fee.\",\"next_action\":\"Start the online return for ORD-1001 and send the item back unopened.\",\"order_id\":\"ORD-1001\",\"policy_window_days\":30,\"evidence_worker_ids\":[\"order-worker\",\"policy-worker\"]}"
+      }
+    ],
+    "supervisor_plan": [
+      {
+        "kind": "success",
+        "raw_json": "{\"assignments\":[{\"worker_id\":\"order-worker\",\"allowed_tools\":[\"lookup_order\"],\"purpose\":\"retrieve authoritative order facts\"},{\"worker_id\":\"policy-worker\",\"allowed_tools\":[\"lookup_return_policy\"],\"purpose\":\"retrieve the applicable return policy\"}]}"
+      }
+    ],
+    "worker:order-worker": [
+      {
+        "delay_seconds": 0.01,
+        "kind": "success",
+        "raw_json": "{\"tool_name\":\"lookup_order\",\"arguments\":{\"order_id\":\"ORD-1001\"}}"
+      }
+    ],
+    "worker:policy-worker": [
+      {
+        "delay_seconds": 0.01,
+        "kind": "success",
+        "raw_json": "{\"tool_name\":\"lookup_return_policy\",\"arguments\":{\"market\":\"US\",\"item_category\":\"household\",\"purchase_channel\":\"online\"}}"
+      }
+    ]
+  },
+  "schema_version": "0.1.0"
+}

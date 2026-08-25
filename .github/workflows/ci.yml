@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pinned uv
+        run: python -m pip install uv==0.12.5
+      - name: Frozen install
+        run: uv sync --frozen --extra dev
+      - name: Lint
+        run: uv run ruff check .
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Type check
+        run: uv run mypy src tests
+      - name: Test
+        run: uv run pytest -q
+      - name: Schema synchronization
+        run: uv run python scripts/check_schema_sync.py
+      - name: Deterministic example generation
+        run: uv run python scripts/regenerate_example.py --output /tmp/retail-return-v1.generated.json
+      - name: Validate generated artifact
+        run: uv run agent-runtime validate-artifact /tmp/retail-return-v1.generated.json
+      - name: Validate checked artifact
+        run: uv run agent-runtime validate-artifact examples/artifacts/retail-return-v1.run.json
+      - name: Semantic example verification
+        run: uv run python scripts/verify_example.py
