@@ -32,9 +32,42 @@ git status --short
 
 Tests, schema synchronization, deterministic example generation, artifact validation, and semantic example verification are required evidence. A workflow file proves configuration only; do not claim remote CI passed without remote evidence.
 
+## Current authorized repository state
+
+```text
+Repository:
+alwin-jacob/agent-reliability-runtime
+
+Remote:
+origin
+
+Remote URL:
+https://github.com/alwin-jacob/agent-reliability-runtime.git
+
+Current visibility:
+private
+
+Default branch:
+main
+```
+
+The repository is currently private. Public visibility is not implied by the presence of a remote. Stage 1 is source-accepted and frozen. Remote CI evidence and current staging facts belong in project-state and claim/evidence documentation. This governance amendment does not authorize a push.
+
+For this repository, `git remote -v` must show exactly the authorized `origin` URL. Local-only tasks must not push merely because the remote exists. A push requires explicit authorization in the active task.
+
 ## Security and external-action rules
 
-- Keep the repository and all work local-only. Never create or modify a GitHub repository, add a Git remote, push, publish, deploy, or open a pull request.
+- GitHub and other external actions are prohibited by default.
+- An external operation is allowed only when Alwin explicitly authorizes the exact repository, exact operation, exact branch, and applicable visibility boundary.
+- Authorization for one operation does not authorize a later or broader operation.
+- Normal fast-forward pushes to the authorized private `origin/main` are allowed only when the current task explicitly authorizes that push.
+- The remote must never be changed, removed, renamed, or repointed without separate explicit authorization.
+- Public visibility always requires a distinct explicit authorization. Authorization to create, stage, push, or inspect a private repository does not authorize publication.
+- Before any authorized push, the tree must be clean except for the explicitly authorized committed work; local `main` and `origin/main` must have the expected relationship; the repository must have the expected visibility; and the changed-file scope must match the authorization.
+- After any authorized push, local, tracking, API, and remote SHAs must be reconciled; CI must be inspected when the task requires it; and visibility must be rechecked.
+- Force-pushes, history rewriting, rebasing published history, branch deletion, tags, releases, issues, pull requests, deployments, package publication, profile edits, pin changes, and outreach remain prohibited unless each is separately and explicitly authorized.
+- Operations on any other repository remain prohibited unless separately authorized.
+- No task may silently expand into Stage 2 or a later capability.
 - Do not use a paid model API, provider CLI model call, cloud service, GPU, or external runtime without explicit user authorization. Stage 1 uses only checked-in deterministic fixtures.
 - Never commit secrets, credential material, environment-variable values, usernames, hostnames, absolute home-directory paths, canonical context, resume PDFs, `ResumeProjects_Submitted.md`, loan or immigration files, or other private project documents.
 - Tools implemented in Stage 1 must be fixture-backed, read-only, network-free, filesystem-free at invocation time, side-effect-free, and idempotent.
@@ -50,4 +83,3 @@ Tests, schema synchronization, deterministic example generation, artifact valida
 - README and claim/evidence documentation must clearly separate what is implemented now from what is planned. Planned work must not appear as an empty module, working feature, or completed checklist item.
 - Do not mark checkpointing, process resume, human approval/interrupts, MCP, sandboxing/Docker, network tools, RAG, Langfuse/LangSmith observability, real-model providers, provider fallback, or benchmark programs as implemented.
 - Before each local commit, the relevant tests and generated artifacts must pass and the staged diff must be inspected. Use the existing Git identity; never invent or change identity configuration.
-- Never add a remote. Confirm `git remote -v` remains empty throughout the work and in final evidence.
