@@ -92,6 +92,10 @@ This milestone does not implement a LangGraph checkpointer, process restart/resu
 
 ## Limitations and next stage
 
-Runs are single-process and keep evidence in memory until one final atomic write, so a process crash loses in-progress work. There is no checkpointer or resume path. Fixture behavior proves orchestration and failure semantics, not real-provider quality or deployment reliability. Authoritative local verification uses Python 3.13.15; the workflow also configures 3.11 and 3.12, but those versions and remote CI were not run in this corrective milestone. Public-release licensing remains unresolved and no LICENSE is included.
+Runs are single-process and keep evidence in memory until one final atomic write, so a process crash loses in-progress work. There is no checkpointer or resume path. Fixture behavior proves orchestration and failure semantics, not real-provider quality or deployment reliability. Authoritative local verification uses Python 3.13.15; the workflow also configures 3.11 and 3.12, but those versions and remote CI were not run in this corrective milestone. The repository is MIT licensed.
 
 No general trajectory-replay claim is made because no adapter or replay command exists. The next exact blocker for real-provider trajectory evidence is a separately authorized adapter contract that distinguishes the internal structured request from any provider-wire envelope, defines redaction, and implements replay semantics. Repeated-sampling orchestration and analysis also remain unimplemented despite correct per-run provider isolation. Checkpoint/resume and human-interrupt design remain separately scoped Stage 2 work.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).

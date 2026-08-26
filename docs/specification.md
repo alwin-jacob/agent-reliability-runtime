@@ -26,7 +26,7 @@ Run isolation is implemented, but repeated-sampling infrastructure and analysis 
 
 ## Boundaries
 
-Stage 1 has no paid or real model provider, provider fallback, network or filesystem execution tool, checkpointing, process resume, human decision/interrupt, MCP, container sandbox, RAG, vector storage, Langfuse/LangSmith project observability, API server, benchmark suite, repeated sampling, calibration study, or cross-repository change. Planned features remain documentation only. Public-release licensing is unresolved and no LICENSE is created in this stage.
+Stage 1 has no paid or real model provider, provider fallback, network or filesystem execution tool, checkpointing, process resume, human decision/interrupt, MCP, container sandbox, RAG, vector storage, Langfuse/LangSmith project observability, API server, benchmark suite, repeated sampling, calibration study, or cross-repository change. Planned features remain documentation only. The source-accepted runtime milestone did not depend on licensing. Its release-preparation descendant adds MIT licensing and package metadata only; no runtime, artifact, schema, test behavior, or Stage 2 capability changed.
 
 ## Acceptance evidence
 
