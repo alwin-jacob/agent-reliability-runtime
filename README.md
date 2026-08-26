@@ -24,10 +24,12 @@ Stage 0 and the deterministic Stage 1 vertical slice are implemented:
   reconciliation, stable failure IDs, exact attempt-event evidence, and accepted partial state;
 - logical-operation accounting, zero-cost fixture accounting, content/configuration/semantic
   fingerprints, atomic JSON persistence, JSON Schema, and cross-record validation;
-- deterministic offline tests and a Python 3.11/3.12/3.13 CI configuration; and
+- deterministic offline tests and verified Python 3.11/3.12/3.13 CI execution; and
 - one checked-in successful artifact tied to a clean local implementation commit.
 
 The fixture provider and tools do not use the network, filesystem at invocation time, credentials, paid resources, or external model processes.
+
+The complete deterministic suite is verified locally on Python 3.13.15 and by GitHub Actions on Python 3.11.16, 3.12.14, and 3.13.15. Initial private-staging run [`32924165501`](https://github.com/alwin-jacob/agent-reliability-runtime/actions/runs/32924165501) passed Ruff, formatting, strict mypy, all 277 tests, schema synchronization, deterministic generation, generated and checked artifact validation, and semantic reproduction in every matrix job. This is verified private GitHub Actions evidence: the repository is not yet public, fixture execution is not real-provider evidence, and CI success is not production deployment evidence.
 
 ## Deterministic quickstart
 
@@ -92,7 +94,7 @@ This milestone does not implement a LangGraph checkpointer, process restart/resu
 
 ## Limitations and next stage
 
-Runs are single-process and keep evidence in memory until one final atomic write, so a process crash loses in-progress work. There is no checkpointer or resume path. Fixture behavior proves orchestration and failure semantics, not real-provider quality or deployment reliability. Authoritative local verification uses Python 3.13.15; the workflow also configures 3.11 and 3.12, but those versions and remote CI were not run in this corrective milestone. The repository is MIT licensed.
+Runs are single-process and keep evidence in memory until one final atomic write, so a process crash loses in-progress work. There is no checkpointer or resume path. Fixture behavior proves orchestration and failure semantics, not real-provider quality or deployment reliability. Authoritative local verification uses Python 3.13.15, and verified private GitHub Actions execution covers Python 3.11.16, 3.12.14, and 3.13.15. The repository is MIT licensed and remains private.
 
 No general trajectory-replay claim is made because no adapter or replay command exists. The next exact blocker for real-provider trajectory evidence is a separately authorized adapter contract that distinguishes the internal structured request from any provider-wire envelope, defines redaction, and implements replay semantics. Repeated-sampling orchestration and analysis also remain unimplemented despite correct per-run provider isolation. Checkpoint/resume and human-interrupt design remain separately scoped Stage 2 work.
 

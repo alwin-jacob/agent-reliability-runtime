@@ -1,5 +1,11 @@
 # Engineering log
 
+## 2026-08-25 — Verified private GitHub staging
+
+The private repository `alwin-jacob/agent-reliability-runtime` was created with initial private-staging source HEAD `9027e2446857b158ac65ae4fee767e68c427e8e6`. Its initial push-triggered GitHub Actions run, `32924165501`, succeeded on Python 3.11.16, 3.12.14, and 3.13.15. Every matrix job passed Ruff, formatting, strict mypy, all 277 tests, schema synchronization, deterministic generation, generated and checked artifact validation, and semantic verification. GitHub detected the MIT license, and the remote README and checked artifact matched the accepted local files.
+
+The repository remained private. No tag, release, Pages site, issue, pull request, deployment, profile edit, pin change, package publication, or outreach occurred. This documentation synchronization changes no runtime, tests, scripts, schemas, fixtures, artifacts, workflow, package metadata, dependency, or lockfile. Public visibility remains separately unauthorized.
+
 ## 2026-08-25 — Stage 1 local public-release preparation
 
 Added the MIT `LICENSE`; standardized package metadata uses `license = "MIT"` and `license-files = ["LICENSE"]`. The package remains `0.3.2`, and the artifact schema remains `0.3.0`. The accepted runtime, schemas, tests, scripts, fixtures, checked artifact, lockfile, and CI configuration were not changed.
