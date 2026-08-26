@@ -1,5 +1,11 @@
 # Engineering log
 
+## 2026-08-25 — Stage 1 local public-release preparation
+
+Added the MIT `LICENSE`; standardized package metadata uses `license = "MIT"` and `license-files = ["LICENSE"]`. The package remains `0.3.2`, and the artifact schema remains `0.3.0`. The accepted runtime, schemas, tests, scripts, fixtures, checked artifact, lockfile, and CI configuration were not changed.
+
+Source and wheel/sdist license inclusion were checked. The current tree, Git history, and built distributions received privacy and secret review. No GitHub, remote, push, publication, deployment, profile, pin, outreach, or cross-repository action occurred.
+
 ## 2026-08-25 — Final Stage 1 taxonomy and startup-cancellation micro-patch
 
 Package version advances to `0.3.2`; durable artifact schema `0.3.0`, all historical artifact schemas, and task/config/model/order/policy fixture schemas remain byte-for-byte unchanged. Artifact validation now mirrors the fixture runtime's exact model/tool attempt origin, outcome, exception, timeout, cancellation, unexpected-exception, typed-transient, and retry boundaries. Tool-policy/input and model-output failures cannot masquerade as nested attempts; tool-output failures are nonretryable and terminal. Deterministic JSON parse, public-schema, and semantic-contract failures must follow the successful provider response they classify, and each request must follow its planning, worker, or finalization lifecycle start while still preceding its first provider attempt.

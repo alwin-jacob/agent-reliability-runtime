@@ -7,6 +7,8 @@ name = "agent-reliability-runtime"
 version = "0.3.2"
 description = "Deterministic local supervisor/worker agent runtime with inspectable reliability evidence"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
   "jsonschema==4.25.1",

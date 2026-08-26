@@ -12,7 +12,7 @@ The current checked successful artifact uses schema 0.3.0 and proves the exact f
 
 Hashes detect modification but are not signatures. Source commit, lock digest, and other provenance require matching repository context before they can support authenticity.
 
-Public-release licensing is unresolved; no LICENSE is present. Authoritative local verification ran on Python 3.13.15. Python 3.11/3.12 and remote CI did not run in this corrective milestone.
+Licensing is resolved as MIT, and a root `LICENSE` exists. The repository remains local-only with no Git remote; remote CI has not run, public staging has not occurred, and publication remains subject to separate explicit authorization. Authoritative local verification ran on Python 3.13.15. Python 3.11/3.12 did not run in this corrective milestone.
 
 ## Status fields
 
@@ -26,5 +26,5 @@ Public-release licensing is unresolved; no LICENSE is present. Authoritative loc
 - Visibility: local-only
 - Git remote status: none
 - Last verified local commit: current evidence `HEAD`; checked artifact records its clean implementation source commit
-- Unresolved risks: no replay adapter/command, no real-provider wire provenance, no repeated sampler, no crash recovery/checkpointer, no process resume, one-process in-memory evidence, fixture-only behavior, no Python 3.11/3.12 or remote CI execution evidence, and unresolved public-release license
+- Unresolved risks: no replay adapter/command, no real-provider wire provenance, no repeated sampler, no crash recovery/checkpointer, no process resume, one-process in-memory evidence, fixture-only behavior, and no Python 3.11/3.12 or remote CI execution evidence
 - Next stage: do not infer a Stage 2 implementation from this milestone; checkpoint/resume and human-interrupt design remain separate, while the exact next blocker for real-provider trajectory evidence is an explicitly authorized adapter contract defining redacted wire provenance and replay semantics
