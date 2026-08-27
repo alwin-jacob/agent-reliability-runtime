@@ -12,22 +12,29 @@ The current checked successful artifact uses schema 0.3.0 and proves the exact f
 
 Hashes detect modification but are not signatures. Source commit, lock digest, and other provenance require matching repository context before they can support authenticity.
 
-The repository is `alwin-jacob/agent-reliability-runtime`, with visibility restricted to private GitHub staging. Its configured `origin` is `https://github.com/alwin-jacob/agent-reliability-runtime.git`. The initial private-staging source HEAD was `9027e2446857b158ac65ae4fee767e68c427e8e6`, and initial private-staging CI run `32924165501` completed successfully. Python 3.11.16, 3.12.14, and 3.13.15 were verified, with 277 tests passing in each matrix job. GitHub detects the root license as MIT. Public visibility is not authorized and was not performed.
+The public repository is `alwin-jacob/agent-reliability-runtime` at <https://github.com/alwin-jacob/agent-reliability-runtime>. Its configured `origin` is `https://github.com/alwin-jacob/agent-reliability-runtime.git`. The initial private-staging source HEAD was `9027e2446857b158ac65ae4fee767e68c427e8e6`; governance and staging-state documentation commits followed. Private-stage CI runs `32924165501` and `33012384259` completed successfully on Python 3.11.16, 3.12.14, and 3.13.15, with 277 tests passing in each matrix job. GitHub detects the root license as MIT. The current `main` documentation commit is the public-release head after its own successful final CI gate. The checked artifact still records its historical clean implementation-source commit.
+
+This release includes no tag, GitHub Release, package publication, deployment, profile change, pin change, or outreach.
 
 ## Status fields
 
 - As-of date: 2026-08-26
+- Repository: `alwin-jacob/agent-reliability-runtime`
+- Visibility: public GitHub repository
+- Public URL: <https://github.com/alwin-jacob/agent-reliability-runtime>
 - Current stage: Stage 0 plus deterministic Stage 1 complete
-- Stage 1 status: source-accepted and frozen
+- Stage 1: source-accepted and frozen
+- Package: 0.3.2
+- Artifact schema: 0.3.0
 - Implemented features: low-level supervisor/worker LangGraph, bounded concurrency, durable request/response/action causality, fixture provider, typed fixture tools, exact attempt taxonomy and effective-policy validation, causal request/output-failure timing, partial successful-output validation, fixture-response semantics, coherent event/failure graphs, cancellation-consistent startup and in-memory evidence commits, accepted partial state, provider isolation, validated atomic schema 0.3.0 artifact, CLI, offline tests, and CI configuration
-- Exact verification status: local Python 3.13.15 verification and private GitHub Actions run `32924165501` on Python 3.11.16, 3.12.14, and 3.13.15; every matrix job passed Ruff, format, strict mypy, all 277 tests, schema synchronization, deterministic generation, generated and checked artifact validation, and semantic verification
-- Claim/evidence status: Stage 1 local implementation plus verified private remote CI; all later-stage, real-provider, deployment, and measurement claims remain unsupported
+- Exact verification status: local Python 3.13.15 verification; private-stage GitHub Actions runs `32924165501` and `33012384259`; and the current release-head Actions run on Python 3.11, 3.12, and 3.13; every matrix job passed Ruff, format, strict mypy, all 277 tests, schema synchronization, deterministic generation, generated and checked artifact validation, and semantic verification
+- Claim/evidence status: Stage 1 local implementation plus verified remote CI and a publicly inspectable repository; all later-stage, real-provider, deployment, and measurement claims remain unsupported
 - Blockers: a separately authorized real-provider adapter with redacted wire provenance and an exact replay command before real-provider trajectory replay; sampling design/analysis before repeated-sampling claims
 - Paid-resource use: none
-- Visibility: private GitHub staging
-- Git remote status: `origin` configured and synchronized at initial staging commit `9027e2446857b158ac65ae4fee767e68c427e8e6` before the governance and documentation descendants
-- Remote CI: verified by initial private-staging run `32924165501`
+- Git remote: `origin` configured and synchronized
+- Remote CI: verified by private-stage runs `32924165501` and `33012384259` plus the current release-head Actions run
 - Last verified local commit: current evidence `HEAD`; the checked artifact continues to record its historical clean implementation-source commit
-- Current release gate: public visibility remains separately unauthorized
-- Unresolved risks: no replay adapter/command, no real-provider wire provenance, no repeated sampler, no crash recovery/checkpointer, no process resume, no human approval/interrupt path, one-process in-memory evidence, and fixture-only behavior
-- Next stage: Stage 2 remains unimplemented and unauthorized; checkpoint/resume and human-interrupt design remain separate, while the exact next blocker for real-provider trajectory evidence is an explicitly authorized adapter contract defining redacted wire provenance and replay semantics
+- Public release gate: completed only after final release-head CI and visibility verification
+- Employer-visible evidence: public Stage 1 repository
+- Remaining risks: fixture-only behavior, no real-provider wire provenance, no replay command, no repeated sampler, no checkpoint/crash recovery, no process resume, no human approval/interrupt path, and no deployment
+- Stage 2: unimplemented and unauthorized; checkpoint/resume and human-interrupt design remain separate, while the exact next blocker for real-provider trajectory evidence is an explicitly authorized adapter contract defining redacted wire provenance and replay semantics

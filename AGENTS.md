@@ -38,6 +38,9 @@ Tests, schema synchronization, deterministic example generation, artifact valida
 Repository:
 alwin-jacob/agent-reliability-runtime
 
+Public URL:
+https://github.com/alwin-jacob/agent-reliability-runtime
+
 Remote:
 origin
 
@@ -45,13 +48,15 @@ Remote URL:
 https://github.com/alwin-jacob/agent-reliability-runtime.git
 
 Current visibility:
-private
+public
 
 Default branch:
 main
 ```
 
-The repository is currently private. Public visibility is not implied by the presence of a remote. Stage 1 is source-accepted and frozen. Remote CI evidence and current staging facts belong in project-state and claim/evidence documentation. This governance amendment does not authorize a push.
+Stage 1 is source-accepted and frozen. The current `main` release-head commit is the authorized Stage 1 public-release head. It was pushed while the repository remained private, and publication occurs only after that commit's push-triggered Python 3.11/3.12/3.13 CI matrix succeeds. Future pushes remain prohibited by default and require exact authorization in the active task. The existence of this public repository does not authorize further changes.
+
+Public visibility of this repository does not authorize profile or pin changes, tags, releases, package publication, issues, pull requests, deployments, outreach, Stage 2, or operations on another repository. A future visibility change requires separate explicit authorization.
 
 For this repository, `git remote -v` must show exactly the authorized `origin` URL. Local-only tasks must not push merely because the remote exists. A push requires explicit authorization in the active task.
 
@@ -60,9 +65,9 @@ For this repository, `git remote -v` must show exactly the authorized `origin` U
 - GitHub and other external actions are prohibited by default.
 - An external operation is allowed only when Alwin explicitly authorizes the exact repository, exact operation, exact branch, and applicable visibility boundary.
 - Authorization for one operation does not authorize a later or broader operation.
-- Normal fast-forward pushes to the authorized private `origin/main` are allowed only when the current task explicitly authorizes that push.
+- Normal fast-forward pushes to the authorized `origin/main` are allowed only when the current task explicitly authorizes that push.
 - The remote must never be changed, removed, renamed, or repointed without separate explicit authorization.
-- Public visibility always requires a distinct explicit authorization. Authorization to create, stage, push, or inspect a private repository does not authorize publication.
+- Any future visibility change requires distinct explicit authorization. Authorization to inspect or modify a public repository does not authorize changing its visibility.
 - Before any authorized push, the tree must be clean except for the explicitly authorized committed work; local `main` and `origin/main` must have the expected relationship; the repository must have the expected visibility; and the changed-file scope must match the authorization.
 - After any authorized push, local, tracking, API, and remote SHAs must be reconciled; CI must be inspected when the task requires it; and visibility must be rechecked.
 - Force-pushes, history rewriting, rebasing published history, branch deletion, tags, releases, issues, pull requests, deployments, package publication, profile edits, pin changes, and outreach remain prohibited unless each is separately and explicitly authorized.

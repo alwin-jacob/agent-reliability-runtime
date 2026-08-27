@@ -4,6 +4,11 @@ This repository makes the execution of a small agent system inspectable. A super
 
 It owns agent execution, not generic evaluation. `llm-eval-reliability` remains a separate repository and was not changed for this milestone.
 
+This Stage 1 repository is publicly inspectable at
+[`alwin-jacob/agent-reliability-runtime`](https://github.com/alwin-jacob/agent-reliability-runtime).
+The public release is the current `main` release-head commit, published only
+after its Python 3.11/3.12/3.13 GitHub Actions matrix passed.
+
 ## Implemented today
 
 Stage 0 and the deterministic Stage 1 vertical slice are implemented:
@@ -29,7 +34,7 @@ Stage 0 and the deterministic Stage 1 vertical slice are implemented:
 
 The fixture provider and tools do not use the network, filesystem at invocation time, credentials, paid resources, or external model processes.
 
-The complete deterministic suite is verified locally on Python 3.13.15 and by GitHub Actions on Python 3.11.16, 3.12.14, and 3.13.15. Initial private-staging run [`32924165501`](https://github.com/alwin-jacob/agent-reliability-runtime/actions/runs/32924165501) passed Ruff, formatting, strict mypy, all 277 tests, schema synchronization, deterministic generation, generated and checked artifact validation, and semantic reproduction in every matrix job. This is verified private GitHub Actions evidence: the repository is not yet public, fixture execution is not real-provider evidence, and CI success is not production deployment evidence.
+The complete deterministic suite is verified locally on Python 3.13.15 and by GitHub Actions on Python 3.11.16, 3.12.14, and 3.13.15. Initial private-staging run [`32924165501`](https://github.com/alwin-jacob/agent-reliability-runtime/actions/runs/32924165501) and staging-state run [`33012384259`](https://github.com/alwin-jacob/agent-reliability-runtime/actions/runs/33012384259) each passed Ruff, formatting, strict mypy, all 277 tests, schema synchronization, deterministic generation, generated and checked artifact validation, and semantic reproduction in every matrix job. The current release-head Actions run passed the same matrix before publication. This is verified GitHub Actions and public repository evidence; fixture execution remains fixture evidence, CI success is not production deployment evidence, and no real-provider or benchmark evidence exists.
 
 ## Deterministic quickstart
 
@@ -94,7 +99,7 @@ This milestone does not implement a LangGraph checkpointer, process restart/resu
 
 ## Limitations and next stage
 
-Runs are single-process and keep evidence in memory until one final atomic write, so a process crash loses in-progress work. There is no checkpointer or resume path. Fixture behavior proves orchestration and failure semantics, not real-provider quality or deployment reliability. Authoritative local verification uses Python 3.13.15, and verified private GitHub Actions execution covers Python 3.11.16, 3.12.14, and 3.13.15. The repository is MIT licensed and remains private.
+Runs are single-process and keep evidence in memory until one final atomic write, so a process crash loses in-progress work. There is no checkpointer or resume path. Fixture behavior proves orchestration and failure semantics, not real-provider quality or deployment reliability. Authoritative local verification uses Python 3.13.15, and verified GitHub Actions execution covers Python 3.11.16, 3.12.14, and 3.13.15. The public repository is MIT licensed.
 
 No general trajectory-replay claim is made because no adapter or replay command exists. The next exact blocker for real-provider trajectory evidence is a separately authorized adapter contract that distinguishes the internal structured request from any provider-wire envelope, defines redaction, and implements replay semantics. Repeated-sampling orchestration and analysis also remain unimplemented despite correct per-run provider isolation. Checkpoint/resume and human-interrupt design remain separately scoped Stage 2 work.
 

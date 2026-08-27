@@ -1,5 +1,11 @@
 # Engineering log
 
+## 2026-08-26 — Stage 1 public release
+
+The current `main` documentation commit was designated as the Stage 1 release head and pushed while `alwin-jacob/agent-reliability-runtime` remained private. Its Python 3.11/3.12/3.13 GitHub Actions matrix was required to pass before the repository changed from private to public. After that green gate, the MIT-licensed repository, README, and checked artifact became publicly accessible at <https://github.com/alwin-jacob/agent-reliability-runtime>.
+
+No implementation, tests, workflow, schemas, fixtures, artifacts, package metadata, dependency, or lockfile changed. No tag, GitHub Release, package publication, Pages site, issue, pull request, deployment, profile edit, pin change, or outreach occurred. Stage 1 remains frozen; Stage 2 and later capabilities remain unimplemented.
+
 ## 2026-08-25 — Verified private GitHub staging
 
 The private repository `alwin-jacob/agent-reliability-runtime` was created with initial private-staging source HEAD `9027e2446857b158ac65ae4fee767e68c427e8e6`. Its initial push-triggered GitHub Actions run, `32924165501`, succeeded on Python 3.11.16, 3.12.14, and 3.13.15. Every matrix job passed Ruff, formatting, strict mypy, all 277 tests, schema synchronization, deterministic generation, generated and checked artifact validation, and semantic verification. GitHub detected the MIT license, and the remote README and checked artifact matched the accepted local files.
