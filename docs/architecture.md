@@ -1,76 +1,552 @@
 # Architecture
 
-## Boundaries
+## Overview
 
-`domain.py` defines strict, frozen, serialization-safe runtime values. `integrity.py` owns neutral canonical JSON and SHA-256 helpers; `versions.py` separates package, artifact, task, config, and fixture versions. `providers/` owns the asynchronous raw-response model boundary. `tools/` owns definitions, policy checks, Pydantic input/output validation, and in-memory retail fixtures. `invocation.py` owns attempt timeout/retry/cancellation behavior. `semantics.py` owns pure Stage 1 plan, task-bound tool-request, worker-evidence, and final-decision rules without importing LangGraph. `orchestration.py` owns LangGraph nodes, the accepted-state recorder, and run-scoped injected services. `artifacts.py` owns fingerprints, causal cross-record validation, JSON Schema, and atomic persistence while calling the same pure semantics. `runtime.py` resolves confined inputs, constructs fresh per-run services, executes the graph, and assembles artifacts. `cli.py` is a thin exit-code and compact-JSON interface.
-
-Generic datasets, scoring, regression analysis, and evaluation artifacts belong to `llm-eval-reliability`, not this repository.
-
-## Supervisor and worker graph
-
-The compiled low-level `StateGraph` has three node definitions:
-
-1. `supervisor_plan` invokes the raw fixture provider, parses a `SupervisorPlan`, enforces the exact two-worker Stage 1 contract, and transitions to `executing_workers`.
-2. A conditional edge returns two `langgraph.types.Send` values. Both target the same generic `worker` node with a distinct `WorkerAssignment`. A reducer appends each `WorkerResult`.
-3. `supervisor_finalize` requires successful `order-worker` and `policy-worker` evidence, invokes the final fixture decision, and applies the pure semantic validator before transitioning to `succeeded`.
-
-The task carries `as_of_date`, `item_condition`, `market`, `item_category`, and `purchase_channel`. Each worker call must exactly match the applicable task fields. Finalization independently validates delivered order status, task/order/policy context equality, condition equality, and authoritative fees/window evidence. It calculates whole calendar days with standard-library dates, rejects a decision date before delivery, treats the window as inclusive, and requires the canonical eligible/ineligible code and exactly both worker IDs.
-
-Each worker acquires the explicit run-scoped semaphore before recording its active section. The overlap test injects a deterministic barrier: neither worker can proceed until both have entered. With a sequential implementation that test times out and fails. A separate configured-bound test observes a maximum of one active worker when the semaphore limit is one.
-
-## Dependency injection and checkpoint readiness
-
-`GraphState` contains only task, phase, plan, current assignment, accumulated results, and final decision values. Provider instances, tool registry, event recorder, phase/evidence locks, semaphore, concurrency probe, accepted-state recorder, and other services live in `RuntimeContext`. The recorder is run-scoped and updated only after a plan, worker result, or final decision passes its live checks. Related record, event, and accepted-state mutations are grouped into narrowly bounded cancellation-deferring commits: an outer `CancelledError` waits for the shielded in-memory unit to finish and is then re-raised. The startup unit contains `run_start` plus the transition to `planning`; planning-lifecycle start is a second protected unit. Cancellation between those units persists a narrowly validated empty-work cancelled artifact with no fabricated planning start or request. If `ainvoke()` cannot return because of cancellation or an unexpected exception, artifact assembly uses the accepted snapshot instead of stale initial graph input. This is not a checkpointer and does not provide crash recovery or resume.
-
-## State transitions
-
-The accepted success path is:
+The runtime is organized around a small set of explicit boundaries:
 
 ```text
-initialized -> planning -> executing_workers -> finalizing -> succeeded
+task + configuration + fixtures
+              |
+              v
+       runtime construction
+              |
+              v
+       LangGraph execution
+              |
+     +--------+--------+
+     |                 |
+     v                 v
+model provider      typed tools
+     |                 |
+     +--------+--------+
+              |
+              v
+       accepted state
+              |
+              v
+       artifact assembly
+              |
+              v
+      semantic validation
+              |
+              v
+       atomic persistence
 ```
 
-`planning`, `executing_workers`, or `finalizing` can transition to `failed`. Any active phase, including `initialized`, can transition to `cancelled`. A shared pure transition predicate drives orchestration and artifact validation; the orchestration surface raises typed `invalid_state_transition` errors. Artifact validation also proves that ordered transition events form one chain from initialized to the persisted final phase.
+The design keeps orchestration, invocation policy, domain semantics, persistence, and provider/tool implementations separate so each can be inspected and tested independently.
 
-## Model and tool boundaries
+## Module boundaries
 
-The `ModelProvider` protocol is asynchronous and provider-independent. Stage 1 implements only a versioned scripted fixture provider. Before invocation, the runtime persists the exact frozen `ModelRequestRecord` passed to the provider, including logical turn, source, phase, fixture key, full structured payload, UTC creation time, and canonical payload SHA-256. Retries reuse that same request. The provider returns `ModelResponse.raw_json`; parsing into `SupervisorPlan`, public `WorkerToolRequest`, or `FinalDecision` occurs after invocation. For the fixture adapter, the internal request record is the complete provider input. It is not chain-of-thought. A real adapter may have an additional provider-wire request/envelope that needs separate redacted provenance.
+### `domain.py`
 
-`LoadedInputs` stores immutable fixture bytes rather than a consumed provider. Every `execute_loaded()` constructs a fresh `FixtureModelProvider`, so reusing one loaded configuration reproduces a transient-failure-then-success script and the same semantic fingerprint. No sampler or repeated-sampling analysis is implemented.
+Defines strict serialization-safe runtime values, including tasks, plans, worker assignments and results, decisions, attempts, events, failures, accounting records, configuration, and artifact structures.
 
-Tools publish typed definitions with generated input/output schemas and fixed metadata: no network, no filesystem, no side effects, and idempotent. Fixture files are read during setup into memory. Worker invocation parses the public strict tool-request model, resolves tool policy/input, applies the exact task-bound semantic contract, and only then persists the accepted logical call. It executes through the common policy and validates every attempt output before accepting a worker result.
+Pydantic models provide the public validation boundary for structured runtime data.
 
-## Retry ownership and accounting
+### `versions.py`
 
-One logical model turn is one durable model request excluding retries; every provider try is a model attempt. One logical tool call is one accepted tool operation; every execution try is a tool attempt. Attempts record timestamps, duration, outcome, response/output or failure, phase, source, and parent trace context. Nonnegative `duration_ms` comes from a monotonic measurement independent of UTC wall-clock timestamps and is not required to equal their subtraction. Accounting counts logical model turns from request records and derives attempts from attempt records; validation derives it again.
+Centralizes package, artifact, task, configuration, and fixture versions.
 
-The common invocation function applies an independent `asyncio.timeout` to every attempt. Typed retryable provider/tool-execution failures, timeout, and explicitly typed transient infrastructure failures may retry. Exponential backoff is capped; fixture-stage jitter is constrained to zero. Model-output, tool-policy, tool-input/output validation, unknown-tool, cancellation, and unexpected unclassified failures do not retry. The graph itself is never retried. Artifact validation independently groups attempts by durable request or call and enforces the applicable effective `RunConfig` maximum, contiguous numbering, terminal success, and the exact fixture-runtime origin/outcome/exception/retry matrix. Model parse/schema/semantic failures remain downstream records after a successful provider attempt, and their timestamps/events must causally follow that attempt. Planner, worker, and finalizer request creation must fall between the corresponding lifecycle start and first provider-attempt start.
+Keeping these versions explicit allows durable artifact formats to evolve independently from the Python package.
 
-A future evaluation adapter should configure the evaluation engine's outer candidate attempts to one by default, preventing a second retry loop around a complete agent run.
+### `integrity.py`
 
-## Cancellation
+Provides canonical JSON serialization and SHA-256 helpers used by request digests and artifact fingerprints.
 
-`CancelledError` is observed for the active attempt, never converted to `InvocationFailed`, and re-raised. Worker `finally` blocks leave the active section and release semaphore capacity, including cancellation inside the optional concurrency probe. Startup, planning entry, model/tool terminal evidence, accepted-plan dispatch, worker acceptance, finalization entry, classified/unexpected failed terminalization, and final success are cancellation-consistent in-memory units. The runtime records a typed cancellation failure and terminal transition for an active phase, snapshots evidence after cleanup, and attempts to atomically persist a cancelled artifact. A persistence failure becomes a sanitized note on the original cancellation and never replaces it. If success or failure was already committed, cancellation-safe terminal assembly persists that terminal artifact; committed success does not gain `run_cancellation`, and the caller's cancellation is then re-raised. `PhaseManager` records the transition event before publishing its new in-memory phase. No checkpointer is involved.
+### `providers/`
 
-## Event ordering
+Defines the asynchronous model-provider boundary.
 
-The in-memory recorder assigns sequence numbers under an `asyncio.Lock`. Artifact order therefore reflects observation order: sequence values are unique, contiguous, and strictly increasing, but worker-event interleaving can differ between runs. Artifact schema 0.3.0 has one closed event vocabulary covering run start, accepted transitions, planning, dispatch, worker lifecycle, every model/tool attempt, finalization, terminal outcome, and persistence start; unknown event types are rejected. Validation requires nondecreasing event timestamps, all durable timestamps within the inclusive run interval, operation start/terminal ordering consistent with attempt records, and distinct run, lifecycle, model-attempt, and tool-attempt span identities. Matching lifecycle start/end events intentionally reuse their one lifecycle span.
+The reference implementation uses a scripted deterministic provider that returns raw JSON. Parsing and semantic validation occur outside the provider so transport/provider behavior remains separate from runtime meaning.
 
-## Artifact integrity and reproducibility
+### `tools/`
 
-`content_sha256` is SHA-256 of canonical JSON with that field omitted. The configuration fingerprint binds embedded task/effective config plus task/config/fixture digests. The semantic fingerprint binds stable request causality (turn, source, phase, fixture key, payload digest), normalized provider responses/attempt outcomes, downstream tool/final outcomes, event types/sources, failure codes, and accounting while excluding volatile IDs, spans, timestamps, durations, source commit/dirty state, and destination. These unkeyed hashes detect modification; they are not signatures, and a writer with modification access can recompute them. Source commit, lock digest, and other provenance require matching repository context before supporting authenticity.
+Owns:
 
-Artifact validation separately proves the exact successful four-turn contract, request/attempt identity, canonical request digests, effective retry policy, deterministic response-to-failure causality, terminal response equality to accepted plan/calls/decision, exact attempt-event cardinality and context, coherent failure references, accepted worker/tool reconciliation, fixture-response consistency, lifecycle order, UTC timestamps, and the same pure semantics used live. Every successful order or policy attempt is strictly revalidated regardless of the final run status, and its accepted worker output must equal the terminal output. Successful fixture responses require scripted finish, zero cost, synthetic-or-absent token attribution, matching fixture metadata, and a consistent model ID; exactly the model, orders, and policies fixture digests are required. These rules check internal consistency rather than authenticity. Successful artifacts reject missing and unrelated turns. Failed/cancelled artifacts allow only legitimately reached turns and cannot invent deterministic output failures contradicted by their stored responses.
+* tool definitions;
+* tool-policy checks;
+* strict input validation;
+* strict output validation;
+* deterministic in-memory reference data.
 
-Full artifacts are expected to differ in volatile run/event/attempt/tool IDs, timestamps, durations, actual concurrent event order, source commit/dirty provenance, and destination-external context. Tests remove exactly those fields, normalize event order, and compare everything else across two runs. Semantic fingerprints must match.
+The reference workflow exposes `lookup_order` and `lookup_return_policy`.
 
-Persistence uses a temporary file in the destination directory, JSON serialization, flush, `fsync`, close, and `os.replace`. Replacement failure removes the temporary and leaves no partial final file.
+### `invocation.py`
 
-## Trade-offs and known limitations
+Owns model and tool attempt execution:
 
-- In-memory evidence plus one final write keeps Stage 1 inspectable but cannot survive a process crash.
-- One generic worker shape and two fixture tools are enough to prove fan-out and policies but not general planning quality.
-- Static fixtures make CI deterministic and cost-free but provide no evidence about real models or external provider reliability.
-- Artifact validation is deliberately stricter than JSON Schema alone because cross-record, accounting, lifecycle, privacy, and fingerprint invariants are semantic.
-- Pydantic models and runtime context preserve a checkpoint-ready separation, but adding a checkpointer requires a separate compatibility/resume design.
-- Transitive LangGraph dependencies are unused unless explicitly wired; their presence is not project observability or a provider integration.
+* per-attempt timeout;
+* retry classification;
+* retry limits;
+* exponential backoff;
+* cancellation propagation;
+* attempt evidence.
+
+This gives providers and tools one consistent reliability boundary.
+
+### `semantics.py`
+
+Contains LangGraph-independent domain rules.
+
+The same pure semantic functions validate:
+
+* supervisor plans;
+* task-bound worker requests;
+* accepted worker evidence;
+* final decisions.
+
+Sharing these functions between live execution and artifact validation prevents the persisted record from using a weaker interpretation than the running system.
+
+### `orchestration.py`
+
+Owns:
+
+* LangGraph nodes and edges;
+* worker fan-out;
+* reducer behavior;
+* runtime phase transitions;
+* accepted-state recording;
+* run-scoped service access.
+
+### `artifacts.py`
+
+Owns:
+
+* artifact assembly;
+* cross-record validation;
+* content, configuration, and semantic fingerprints;
+* JSON Schema generation;
+* artifact persistence.
+
+### `runtime.py`
+
+Loads confined inputs, constructs fresh run-scoped services, executes the graph, snapshots accepted evidence, and coordinates final artifact construction.
+
+### `cli.py`
+
+Provides a compact command-line interface over runtime execution and artifact validation.
+
+## Graph structure
+
+The runtime uses a low-level LangGraph `StateGraph`.
+
+```text
+START
+  |
+  v
+supervisor_plan
+  |
+  +--> Send(order-worker)  -------\
+  |                                \
+  +--> Send(policy-worker) ---------> worker-result reducer
+                                      |
+                                      v
+                               supervisor_finalize
+                                      |
+                                      v
+                                     END
+```
+
+There are three node definitions:
+
+1. `supervisor_plan`
+2. one generic `worker`
+3. `supervisor_finalize`
+
+The supervisor creates two `WorkerAssignment` values.
+
+Both assignments are sent to the same generic worker node through `langgraph.types.Send`. Worker behavior comes from the assignment and its allowed tool rather than from separate worker implementations.
+
+A reducer accumulates `WorkerResult` values before finalization.
+
+## Supervisor planning
+
+`supervisor_plan` invokes the provider and parses the returned JSON into a strict `SupervisorPlan`.
+
+For the reference workflow, the accepted plan contains exactly:
+
+* `order-worker`;
+* `policy-worker`.
+
+The order worker is bound to `lookup_order`.
+
+The policy worker is bound to `lookup_return_policy`.
+
+The semantic validator also checks that each planned request matches the task context.
+
+Only a validated plan crosses the accepted-state boundary.
+
+## Worker execution
+
+Each worker receives a `WorkerAssignment` and resolves its allowed tool through the tool registry.
+
+Worker execution follows this sequence:
+
+```text
+assignment
+   |
+   v
+tool policy
+   |
+   v
+input validation
+   |
+   v
+task-context validation
+   |
+   v
+logical tool call
+   |
+   v
+attempt execution
+   |
+   v
+output validation
+   |
+   v
+WorkerResult
+```
+
+A successful worker result must correspond to the terminal successful output of its accepted logical tool call.
+
+## Bounded concurrency
+
+Workers execute under a run-scoped `asyncio.Semaphore`.
+
+The concurrency tests avoid relying only on elapsed wall-clock time.
+
+One deterministic test places both workers behind an injected barrier and requires both to enter the active region before either may continue. A sequential implementation cannot satisfy that contract.
+
+A separate test configures a one-slot bound and verifies that observed active concurrency never exceeds one.
+
+## Runtime context
+
+Graph state contains serializable execution values such as:
+
+* task;
+* phase;
+* accepted plan;
+* current assignment;
+* accumulated worker results;
+* final decision.
+
+Operational services are injected through `RuntimeContext`, including:
+
+* provider;
+* tool registry;
+* event recorder;
+* synchronization locks;
+* semaphore;
+* concurrency probe;
+* accepted-state recorder.
+
+This keeps resource-bearing runtime objects outside graph state and leaves state focused on portable execution values.
+
+## Accepted-state recorder
+
+A run-scoped accepted-state recorder tracks values that have passed their live validation boundary.
+
+It records:
+
+* the accepted plan;
+* completed worker results;
+* the accepted final decision.
+
+If graph execution exits through cancellation or an unexpected exception, artifact assembly can use this snapshot rather than reverting to the initial graph input.
+
+This is particularly important when one worker has already completed while another is interrupted.
+
+## Runtime phases
+
+The normal successful path is:
+
+```text
+initialized
+    -> planning
+    -> executing_workers
+    -> finalizing
+    -> succeeded
+```
+
+The transition model also supports `failed` and `cancelled` terminal states.
+
+One pure transition predicate is shared by orchestration and artifact validation.
+
+The event stream therefore records the same state-machine contract that validation later checks.
+
+## Model-provider boundary
+
+`ModelProvider` is asynchronous and provider-independent.
+
+Before the first provider attempt for a logical turn, the runtime persists a `ModelRequestRecord` containing:
+
+* logical turn;
+* source;
+* phase;
+* fixture key;
+* structured payload;
+* creation timestamp;
+* canonical payload SHA-256.
+
+Retries reference that same logical request.
+
+The provider returns `ModelResponse.raw_json`.
+
+The runtime then parses that response into the expected public type:
+
+* `SupervisorPlan`;
+* `WorkerToolRequest`;
+* `FinalDecision`.
+
+For the deterministic fixture adapter, the structured request is the complete provider input.
+
+A hosted-provider adapter can preserve this semantic request boundary while adding a separate redacted wire-level representation for provider-specific transport data.
+
+## Per-run provider isolation
+
+`LoadedInputs` retains immutable fixture construction data.
+
+Each call to `execute_loaded()` constructs a fresh `FixtureModelProvider`.
+
+This ensures that provider state such as scripted transient failures belongs to one execution rather than leaking into the next execution.
+
+Independent runs can therefore reproduce the same logical attempt behavior and semantic result.
+
+## Invocation and retry ownership
+
+One logical model turn corresponds to one durable request.
+
+Each provider try is a model attempt.
+
+One accepted logical tool operation corresponds to one tool call.
+
+Each execution try is a tool attempt.
+
+Every attempt records information such as:
+
+* source;
+* phase;
+* attempt number;
+* start and completion time;
+* monotonic duration;
+* outcome;
+* response or output;
+* failure reference;
+* trace context.
+
+The common invocation layer applies an independent `asyncio.timeout` to each attempt.
+
+Retryable execution failures can follow the configured retry policy and exponential backoff.
+
+Validation and policy failures remain outside that retry category so malformed or semantically invalid output is not treated as transient infrastructure behavior.
+
+The graph execution itself remains a single runtime execution; model and tool retry accounting stays inside that run.
+
+## Cancellation model
+
+`asyncio.CancelledError` remains caller-visible control flow.
+
+The runtime groups small related in-memory evidence updates into bounded cancellation-safe units so records do not become internally inconsistent at important state boundaries.
+
+Examples include:
+
+* run startup and initial transition;
+* planning lifecycle entry;
+* model/tool terminal evidence;
+* accepted-plan dispatch;
+* accepted worker results;
+* finalization entry;
+* terminal failure evidence;
+* final success.
+
+If cancellation arrives while one of these small evidence units is being committed, the unit finishes coherently and the original cancellation is then propagated.
+
+Worker cleanup releases semaphore capacity and leaves the active concurrency probe consistently updated.
+
+Artifact assembly uses the latest accepted-state snapshot after cleanup.
+
+## Event stream
+
+The in-memory recorder assigns event sequence numbers under an `asyncio.Lock`.
+
+Sequence numbers are therefore:
+
+* unique;
+* contiguous;
+* strictly increasing.
+
+Concurrent worker events may interleave differently between independent runs, so the recorded order reflects actual observation order rather than imposing an artificial deterministic worker schedule.
+
+The event vocabulary covers:
+
+* run start;
+* phase transitions;
+* planning;
+* worker dispatch;
+* worker lifecycle;
+* model attempts;
+* tool attempts;
+* finalization;
+* failures;
+* cancellation;
+* terminal outcome;
+* persistence lifecycle.
+
+Artifact validation reconciles these events against the corresponding durable operation records.
+
+## Time model
+
+UTC timestamps represent wall-clock event time.
+
+Attempt durations use an independent monotonic clock.
+
+Because those clocks serve different purposes, `duration_ms` is required to be nonnegative but is not derived by subtracting UTC timestamps.
+
+This avoids introducing clock-adjustment artifacts into execution-duration evidence.
+
+## Failure-reference graph
+
+Failures receive stable `failure_id` values.
+
+The same identifier connects related evidence across:
+
+* model or tool attempts;
+* worker results;
+* top-level failure records;
+* events;
+* terminal state.
+
+Validation checks that those references form a coherent graph and rejects dangling, duplicate, or contradictory relationships.
+
+## Accounting
+
+Accounting distinguishes logical work from physical attempts.
+
+For model activity:
+
+```text
+logical model turn -> one ModelRequestRecord
+                    -> one or more model attempts
+```
+
+For tools:
+
+```text
+logical tool call -> one accepted tool operation
+                  -> one or more tool attempts
+```
+
+The runtime derives its accounting from operation records.
+
+Artifact validation independently derives the same values and requires the persisted accounting summary to match.
+
+## Artifact validation
+
+Artifact schema `0.3.0` uses strict models and a closed event vocabulary.
+
+Validation operates across the full execution record rather than validating records independently.
+
+Important relationships include:
+
+```text
+request
+  -> attempt
+      -> provider response
+          -> accepted plan / tool request / decision
+
+worker assignment
+  -> logical tool call
+      -> tool attempts
+          -> successful tool output
+              -> WorkerResult
+
+failure
+  -> attempt / worker / event references
+```
+
+Validation also checks:
+
+* request and attempt identity;
+* contiguous attempt numbering;
+* effective retry limits;
+* operation timing;
+* lifecycle ordering;
+* transition chains;
+* tool-result identity;
+* accepted-state consistency;
+* failure references;
+* accounting reconciliation;
+* task-bound semantic correctness.
+
+The same pure semantic functions used during execution are reapplied to persisted evidence.
+
+## Integrity fingerprints
+
+Artifacts contain three complementary fingerprints.
+
+### Content fingerprint
+
+`content_sha256` hashes canonical JSON with that field omitted.
+
+### Configuration fingerprint
+
+Binds the stable task, effective configuration, and input digests used to construct the run.
+
+### Semantic fingerprint
+
+Binds stable request causality and normalized execution outcomes while excluding intentionally volatile fields such as:
+
+* generated IDs;
+* timestamps;
+* measured durations;
+* concurrent event interleaving;
+* destination-specific context.
+
+This allows two independent deterministic executions to retain truthful runtime-specific details while still producing the same normalized semantic identity.
+
+## Reproducibility
+
+Full artifacts are expected to differ where real execution produces volatile values.
+
+Tests therefore compare a documented stable projection rather than forcing byte-for-byte identity.
+
+Independent deterministic executions must preserve the expected logical attempt pattern and semantic fingerprint.
+
+## Persistence
+
+Final artifact persistence uses:
+
+1. a temporary file in the destination directory;
+2. serialization;
+3. flush;
+4. `fsync`;
+5. close;
+6. `os.replace`.
+
+If replacement fails, the temporary file is removed so a partial final artifact is not left behind.
+
+The current persistence model collects execution evidence in memory and performs one final atomic artifact write.
+
+## Evaluation boundary
+
+Runtime execution and evaluation are intentionally separate layers.
+
+The runtime owns one execution and its evidence.
+
+An evaluation adapter can consume the final structured output and reference the runtime artifact while leaving scoring, aggregation, regression analysis, and repeated-run policy to the evaluation system.
+
+This prevents evaluation-level retries from being confused with the model and tool retries already represented inside a runtime execution.
+
+## Design trade-offs
+
+The current architecture optimizes for deterministic inspection of orchestration and failure behavior:
+
+* explicit low-level graph structure makes node and edge behavior visible;
+* strict typed boundaries make malformed state fail early;
+* one generic worker keeps fan-out behavior uniform;
+* deterministic fixtures make reliability tests reproducible and inexpensive;
+* cross-record validation makes the persisted execution path inspectable rather than treating the artifact as a collection of unrelated records;
+* run-scoped dependency injection keeps operational services separate from serializable graph state;
+* atomic final persistence keeps the durable artifact internally coherent.
+
+The same boundaries provide extension points for hosted providers, additional tool families, alternative persistence mechanisms, and evaluation adapters.
