@@ -1,23 +1,18 @@
-# Evaluation integration contract
+# Evaluation integration
 
-Agent-runtime artifacts and `llm-eval-reliability` evaluation artifacts are different artifact types with different replay semantics. Stage 1 requires no change to `llm-eval-reliability`, and no cross-repository modification is authorized.
+The agent runtime and `llm-eval-reliability` have complementary responsibilities.
 
-Current runtime artifact schema 0.3.0 persists the exact internal structured request passed to the fixture provider, its canonical payload digest, provider attempts/responses, accepted calls/results, and final decision. This is causal evidence, not chain-of-thought capture and not a general replay interface. The fixture request is the complete fixture-provider input. A later real-provider adapter may create a separate provider-wire envelope that must have explicitly redacted provenance rather than being conflated with the internal request.
+This repository owns agent execution: orchestration, model and tool attempts, retries, failures, accounting, provenance, and the runtime artifact.
 
-A future trusted local adapter can implement the existing asynchronous `Candidate.generate()` contract. `CandidateResponse.output` should contain the serialized final structured decision. `CandidateResponse.metadata` should contain a portable agent-run reference with:
+`llm-eval-reliability` owns evaluation: candidate execution interfaces, scoring, aggregation, regression analysis, and evaluation artifacts.
 
-- `schema_version`;
-- `run_id`;
-- `status`;
-- artifact content SHA-256;
-- semantic fingerprint;
-- task and configuration fingerprints;
-- accounting summary;
-- `external_model_calls`; and
-- a relative artifact locator only when it is portable.
+Keeping those artifact types separate allows the runtime to preserve detailed execution evidence while the evaluation layer remains independent of a particular agent implementation.
 
-The evaluation engine's outer candidate `max_attempts` should default to 1 for this adapter. The runtime already records and controls internal model/tool retries; retrying the whole candidate run by default would double-retry and misrepresent turn, attempt, cost, and failure evidence.
+## Candidate adapter
 
-The exact current integration gap is an implemented adapter/replay contract: runtime artifacts do not yet have a replay command, real-provider wire provenance, or a portable evaluation-owned reference with defined compatibility semantics. No claim of general trajectory replay is made.
+Integration can use the existing asynchronous `Candidate.generate()` interface.
 
-This gap does not block deterministic final-output evaluation: a future trusted local adapter can invoke the runtime and return the final decision through the candidate contract. Trajectory-aware scoring and portable cross-repository replay need a later, separately authorized contract change. Correct per-run provider isolation is implemented, but repeated-sampling orchestration, aggregation, and analysis are not.
+A runtime-backed candidate should place the final structured decision in:
+
+```text
+CandidateResponse.output
